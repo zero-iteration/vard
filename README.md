@@ -59,6 +59,15 @@ The metric VARD is built for is **file localization**: given an issue, are the f
 
 **12% of all couplings (20% cross-module) are found by VARD alone** — no text, embedding, or call-graph signal surfaces them. This is the part nothing else does.
 
+**Token cost — the point of all this.** In a controlled comparison (n=15) — an agent reading whole files in relevance order until it has seen all the gold code, vs. reading the precise spans VARD returns:
+
+| | tokens to reach the relevant code | files / spans opened |
+|---|:--:|:--:|
+| blind agent (whole files) | ~209,700 | ~233 files |
+| **with VARD (precise spans)** | **~6,000** | **~35 spans** |
+
+Treat the raw multiple as an **upper bound** — a real agent greps and reads files partially, it wouldn't open 233 whole files. But the shape is the point: VARD hands the model the relevant code in a small fraction of the context, which lines up with the 40–95% token savings reported for context pre-feeding. Less wasted context = fewer tokens, fewer tool-calls, and less attention spent on noise.
+
 **It generalizes.** Validated on Python (SWE-bench Verified) and Java / Spring Boot (two unseen apps). On a repo the models had **not** memorized: given only the issue text, a frontier model located the right file in **0 of 8** cases on its own; with VARD's retrieved context, **6 of 8** — and produced working fixes for several.
 
 **Honest scope.** VARD is a localization/retrieval layer; the model still does the reasoning and the patch. Samples are small-to-medium (ContextBench n=30, SWE-bench Verified n=109); the resolution figures are directional, not a `%Resolved` leaderboard result (it isn't one, and isn't comparable to one).
