@@ -79,9 +79,16 @@ Python 3.10+. The base install needs no API key and your code never leaves the m
 Run from inside the repo (path defaults to `.`):
 
 ```bash
-vard init                                  # index it once (auto-refreshes on change; shows progress)
+vard init        # the only command you need to remember
+```
+
+`vard init` does everything: indexes the repo, **writes a routing block to your `CLAUDE.md`/`AGENTS.md`** so your agent uses VARD automatically, and **registers the MCP server** (if Claude Code is installed). After it, just describe a task to your agent — it'll call VARD on its own. Re-run anytime; it's idempotent and re-indexes only changed files. (`vard init --no-wire` to only index.)
+
+The other commands exist but you rarely type them — your agent calls these (or their `vard_*` MCP equivalents):
+
+```bash
 vard context "<bug or task>"               # relevant code + coupled partners, with reasons
-vard couplings                             # list hidden writer⇄reader data couplings
+vard couplings                             # hidden writer⇄reader data couplings
 vard impact OrderService.updateStatus      # blast radius before an edit
 vard resource redis:status                 # who reads/writes a cache key / table / queue
 vard learn                                 # optional: tune ranking weights from this repo's git history
@@ -89,13 +96,9 @@ vard learn                                 # optional: tune ranking weights from
 
 ## Use it with an agent (MCP)
 
-VARD ships an MCP server so agents (Claude Code, Cursor, ...) can call it:
+`vard init` already registers the MCP server and writes the agent routing block — so **just run `vard init` and restart your agent.** Then describe a task in plain English and it calls `vard_context` / `vard_impact` itself; no need to say "use vard."
 
-```bash
-claude mcp add vard -- vard-mcp
-```
-
-Tools: `vard_context` (the main one), `vard_impact`, `vard_resource`, `vard_couplings`, `vard_index`, and agent-driven discovery (`vard_discovery_request` / `vard_set_ruleset`, so the agent itself supplies the resource ruleset — no key).
+If you'd rather wire it by hand (or use Cursor/another client): `claude mcp add vard -- vard-mcp`, and `vard rules --write` to (re)apply the routing block. Tools exposed: `vard_context`, `vard_impact`, `vard_resource`, `vard_couplings`, `vard_index`, plus agent-driven discovery (`vard_discovery_request` / `vard_set_ruleset`). See [`AGENTS.md`](AGENTS.md) for the agent-facing guide.
 
 Optional pre-edit hook — warns the agent automatically when it edits code coupled through shared state:
 

@@ -18,6 +18,71 @@ VDIR = ".vard"
 def _index_path(repo): return os.path.join(os.path.abspath(repo), VDIR, "index.pkl")
 
 
+# Routing rules an AI agent should follow to use VARD proactively. `vard rules` prints this;
+# `vard rules --write` drops it into the repo's CLAUDE.md / AGENTS.md (idempotent) so the agent
+# picks it up automatically and stops being told "use vard" every time.
+AGENT_RULES = """<!-- vard:routing (managed by `vard rules` — safe to leave; re-run to update) -->
+## Code retrieval with VARD
+
+This repo is indexed by **VARD** (a local symbol-graph + data-coupling code retriever; MCP server `vard`).
+Use it proactively, without being asked:
+
+- **Locating code** ("where is X", "what handles Y", understanding a feature, or gathering context
+  before a multi-file change): call `vard_context("<task in plain words>")` **first**, before grepping
+  or reading files, and use the returned `file:line` spans as your starting set.
+- **Before editing code that touches shared state**: call `vard_impact("<QualifiedName or file.py:line>")`
+  for the blast radius (readers/writers coupled through caches, DBs, or queues).
+- **Tracing a resource**: `vard_resource("<table / cache-key / queue>")` for who writes vs reads it.
+- Skip VARD for trivial edits to a file you already have open.
+
+If the MCP tools aren't loaded, the CLI is equivalent: `vard context "..."`, `vard impact <name>`,
+`vard resource <name>`, `vard couplings`. The index self-refreshes; run `vard init` once if `.vard/` is absent.
+<!-- /vard:routing -->
+"""
+
+
+def _write_rules(repo, fname=None):
+    """Add/refresh the VARD routing block in the repo's agent config (CLAUDE.md or AGENTS.md)."""
+    import re
+    repo = os.path.abspath(repo)
+    if fname:
+        target = os.path.join(repo, fname)
+    else:
+        target = next((os.path.join(repo, c) for c in ("CLAUDE.md", "AGENTS.md")
+                       if os.path.isfile(os.path.join(repo, c))), os.path.join(repo, "CLAUDE.md"))
+    existing = open(target, encoding="utf-8", errors="ignore").read() if os.path.isfile(target) else ""
+    if "<!-- vard:routing" in existing:
+        new = re.sub(r"<!-- vard:routing.*?<!-- /vard:routing -->\n?", AGENT_RULES, existing, flags=re.S)
+        open(target, "w").write(new)
+        return f"↻ refreshed VARD routing in {target}"
+    glue = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
+    open(target, "a").write(glue + AGENT_RULES)
+    return f"added VARD routing to {os.path.basename(target)}"
+
+
+def _wire_mcp(repo):
+    """Best-effort: register the VARD MCP server with Claude Code so the agent can call it natively.
+    Skips silently if the `claude` CLI isn't present (routing rules + CLI still work without MCP)."""
+    import shutil, subprocess
+    claude = shutil.which("claude")
+    if not claude:
+        return None
+    try:                                              # already registered?
+        g = subprocess.run([claude, "mcp", "get", "vard"], capture_output=True, text=True, timeout=15, cwd=repo)
+        if g.returncode == 0 and "vard" in (g.stdout or ""):
+            return "MCP server 'vard' already registered"
+    except Exception:
+        pass
+    mcp_bin = shutil.which("vard-mcp") or "vard-mcp"
+    try:
+        r = subprocess.run([claude, "mcp", "add", "vard", "--", mcp_bin], capture_output=True, text=True, timeout=20, cwd=repo)
+        if r.returncode == 0:
+            return "registered MCP server 'vard' — restart your agent to load its tools"
+    except Exception:
+        pass
+    return f"couldn't auto-register MCP; run:  claude mcp add vard -- {mcp_bin}"
+
+
 def build_index(repo, fresh=False, llm=None):
     """Build & cache the attention graph + resource layer. llm: optional agent LLM for discovery."""
     repo = os.path.abspath(repo)
@@ -285,6 +350,7 @@ def main():
     ap = argparse.ArgumentParser(prog="vard")
     sub = ap.add_subparsers(dest="cmd", required=True)
     pi = sub.add_parser("init"); pi.add_argument("repo", nargs="?", default="."); pi.add_argument("--fresh", action="store_true")
+    pi.add_argument("--no-wire", action="store_true", help="just index; don't touch CLAUDE.md or register the MCP server")
     pc = sub.add_parser("couplings"); pc.add_argument("repo", nargs="?", default="."); pc.add_argument("--limit", type=int, default=40)
     px = sub.add_parser("context"); px.add_argument("task"); px.add_argument("repo", nargs="?", default="."); px.add_argument("-k", type=int, default=8); px.add_argument("--hypothetical", default=None)
     pm = sub.add_parser("impact"); pm.add_argument("target"); pm.add_argument("repo", nargs="?", default=".")
@@ -292,6 +358,9 @@ def main():
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
     pu = sub.add_parser("uninstall-hook"); pu.add_argument("repo", nargs="?", default="."); pu.add_argument("--global", dest="glob", action="store_true")
     pl = sub.add_parser("learn"); pl.add_argument("repo", nargs="?", default="."); pl.add_argument("--sample", type=int, default=150)
+    pru = sub.add_parser("rules", help="print (or --write) agent routing rules for CLAUDE.md / AGENTS.md")
+    pru.add_argument("repo", nargs="?", default="."); pru.add_argument("--write", action="store_true")
+    pru.add_argument("--file", default=None, help="target file (default: existing CLAUDE.md/AGENTS.md, else CLAUDE.md)")
     a = ap.parse_args()
     try:
         _dispatch(a)
@@ -311,6 +380,14 @@ def _dispatch(a):
         print(f"✓ indexed {s['repo']}  (ruleset: {s['ruleset_source']})")
         print(f"  code: {s['code_nodes']} nodes / {s['code_edges']} edges")
         print(f"  resources: {s['resources']}, {s['resource_edges']} read/write edges")
+        if not a.no_wire:
+            print(f"  • {_write_rules(a.repo)}")               # agent uses VARD automatically
+            m = _wire_mcp(a.repo)
+            if m:
+                print(f"  • {m}")
+            print("  → done. Just describe a task to your agent — it'll use VARD on its own.")
+    elif a.cmd == "rules":
+        print(_write_rules(a.repo, a.file) if a.write else AGENT_RULES)
     elif a.cmd == "couplings":
         print(couplings_text(a.repo, a.limit))
     elif a.cmd == "context":
