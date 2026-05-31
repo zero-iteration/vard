@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vard": {
+      "command": "vard-mcp",
+      "env": { "VARD_EMB_MODEL": "none" }
+    }
+  }
+}

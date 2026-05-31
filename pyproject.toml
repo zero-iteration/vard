@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vard"
+version = "0.1.0"
+description = "Repository attention + data-resource coupling for AI coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Shreyash Vardhan"}]
+keywords = ["code-retrieval", "code-search", "ai-coding-agents", "rag", "static-analysis",
+            "tree-sitter", "localization", "mcp", "code-graph"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+  "tree-sitter>=0.21,<0.26",
+  "tree-sitter-language-pack>=0.12,<1.0",
+  "rank-bm25>=0.2",
+  "networkx>=3",
+  "numpy>=1.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/zero-iteration/vard"
+Repository = "https://github.com/zero-iteration/vard"
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=2.2"]
+openai = ["openai>=1.0"]
+mcp = ["mcp>=1.0"]
+learn = ["scikit-learn>=1.0"]
+all = ["sentence-transformers>=2.2", "openai>=1.0", "mcp>=1.0", "scikit-learn>=1.0"]
+
+[project.scripts]
+vard = "vard.cli:main"
+vard-mcp = "vard.mcp_server:main"
+vard-hook = "vard.hook:main"
+
+[tool.setuptools]
+packages = ["vard", "vard.languages"]

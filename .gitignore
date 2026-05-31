@@ -1,0 +1,20 @@
+# envs & build
+.venv/
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.pyc
+
+# VARD per-repo index/caches (regenerated)
+.vard/
+
+# local secrets / config
+.mcp.json
+*.key
+
+# os
+.DS_Store
+
+# local agent config (machine-specific hook paths)
+.claude/
