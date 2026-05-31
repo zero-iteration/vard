@@ -38,7 +38,7 @@ The metric VARD is built for is **file localization**: given an issue, are the f
 |  10   | **0.75** | **0.74** |
 |  20   | 0.84 | 0.83 |
 
-**vs other retrievers** (ContextBench, Python issues with annotated gold context — every row scored on the same set):
+**vs other retrievers** (on **ContextBench**, a public benchmark of real GitHub issues with human-annotated gold context — every row scored on the same set):
 
 | retriever | file recall @10 | file recall @40 | line/span recall @10 |
 |---|:--:|:--:|:--:|
