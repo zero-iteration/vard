@@ -70,6 +70,15 @@ Treat the raw multiple as an **upper bound** — a real agent greps and reads fi
 
 **It generalizes.** Validated on Python (SWE-bench Verified) and Java / Spring Boot (two unseen apps). On a repo the models had **not** memorized: given only the issue text, a frontier model located the right file in **0 of 8** cases on its own; with VARD's retrieved context, **6 of 8** — and produced working fixes for several.
 
+**The context matters more than the model.** On real Spring Boot bugs (n=4; fresh Claude subagents, no API key, judged against the official fix commit), each model first saw only the issue text, then the issue plus VARD's retrieved spans:
+
+| model | issue text only | + VARD context |
+|---|:--:|:--:|
+| Opus 4.8 | 0/4 | 2/4 |
+| Sonnet 4.5 | 0/4 | 2/4 |
+
+Without code, both hallucinated file paths and APIs and fixed nothing (memorization didn't save them). With VARD's context both fixed the same bugs — and **Sonnet 4.5 + VARD matched Opus 4.8.** The deciding factor was the retrieved context, not the model: a cheaper model with the right spans reached what the expensive one did. (Small n, LLM-judged, directional — read it as the model-equivalence signal, not a resolution rate.)
+
 **Honest scope.** VARD is a localization/retrieval layer; the model still does the reasoning and the patch. Samples are small-to-medium (ContextBench n=30, SWE-bench Verified n=109); the resolution figures are directional, not a `%Resolved` leaderboard result (it isn't one, and isn't comparable to one).
 
 ## Install
