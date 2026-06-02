@@ -9,7 +9,7 @@ vard — repository attention for AI coding agents (stack-agnostic, key-optional
 Shared core functions (build_index / couplings_text / context_text) are reused by
 the MCP server so an agent can call the same logic.
 """
-import argparse, os, pickle, sys
+import argparse, os, pickle, re, sys
 from . import common as C, graph as G, resources as R, freshness as Fr
 
 VDIR = ".vard"
@@ -33,6 +33,10 @@ Use it proactively, without being asked:
 - **Before editing code that touches shared state**: call `vard_impact("<QualifiedName or file.py:line>")`
   for the blast radius (readers/writers coupled through caches, DBs, or queues).
 - **Tracing a resource**: `vard_resource("<table / cache-key / queue>")` for who writes vs reads it.
+- **Data is wrong / stale / incomplete and the code that sets it isn't obvious** (state-first localization):
+  call `vard_state_candidates("<task>")` to see the program's state types, identify which hold the WRONG
+  state (including state the symptom doesn't name), then `vard_state_lineage("TypeA, TypeB")` to get the code
+  that defines and produces/consumes it — including producers in other modules with no textual link to the bug.
 - Skip VARD for trivial edits to a file you already have open.
 
 If the MCP tools aren't loaded, the CLI is equivalent: `vard context "..."`, `vard impact <name>`,
@@ -124,9 +128,16 @@ def build_index(repo, fresh=False, llm=None):
         print(f"⚠ vard: import-graph build failed ({str(e)[:50]}) — indexing without graph-PPR", file=sys.stderr, flush=True)
         import_edges = []
     try:
+        from . import state as ST
+        print("→ vard: building state graph (types + producers/consumers)...", file=sys.stderr, flush=True)
+        state_graph = ST.build_state_graph(rg, repo)
+    except Exception as e:
+        print(f"⚠ vard: state-graph build failed ({str(e)[:50]}) — indexing without state lineage", file=sys.stderr, flush=True)
+        state_graph = None
+    try:
         with open(_index_path(repo), "wb") as f:
             pickle.dump({"rg": rg, "ruleset": rs, "fingerprint": Fr.fingerprint(repo), "history": hist,
-                         "import_edges": import_edges, "res": res}, f)
+                         "import_edges": import_edges, "res": res, "state": state_graph}, f)
     except Exception as e:
         raise RuntimeError(f"could not write index to {_index_path(repo)}: {e}") from e
     gs = rg.stats()
@@ -257,7 +268,63 @@ def context_text(task, repo, k=8, hypothetical=None):
             out.append("\n## Structurally reachable (imported by/importing relevant code — candidates)")
             for f in exp:
                 out.append(f"- {f}")
+    # state lineage: the code that DEFINES/PRODUCES the data this task touches. Gated — fires only
+    # when state is clearly implicated (a type the task names, or a cache/queue resource it points
+    # at), so it stays quiet on ordinary logic bugs. The agent path (vard_state) covers state the
+    # task never names by reasoning about it.
+    try:
+        from . import state as ST
+        sg = idx.get("state") or ST.build_state_graph(rg, repo)
+        st_types = ST.auto_implicated(sg, rg, task, top)
+        if st_types:
+            shown = set(top) | set(coupled)
+            rows = ST.render(rg, ST.lineage(sg, rg, st_types), exclude=shown)[:k]
+            if rows:
+                out.append("\n## State lineage (defines/produces the data this task touches)")
+                out += rows
+    except Exception:
+        pass
     return "\n".join(out)
+
+
+def state_candidates_text(task, repo):
+    """The state types the agent chooses from (the program's data structures, narrowed to the region
+    the search surfaced). The agent reads these, reasons about which hold the WRONG state for the
+    task, then calls state_lineage with those names."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import state as ST, rank as RK, selflabel as SL
+    rg = idx["rg"]
+    sg = idx.get("state") or ST.build_state_graph(rg, os.path.abspath(repo))
+    nodes = ST._content_nodes(rg)
+    score, _ = RK.rank_nodes(idx, task, repo, nodes, weights=SL.load_weights(repo))
+    seeds = sorted(score, key=score.get, reverse=True)[:10]
+    seed_files = {rg.nodes[i].file for i in seeds}
+    cands = ST.candidates(sg, rg, seed_files, task)
+    return ("# Candidate state types for: " + (task or "")[:120] + "\n"
+            "# Identify which of these hold/define the WRONG state (or that the fix must change) for "
+            "this task — including state the task does NOT name but is structurally involved — then "
+            "call vard_state_lineage with those type names.\n" + ", ".join(cands))
+
+
+def state_lineage_text(types, repo):
+    """Given state type names (e.g. the ones the agent identified), return the code that defines and
+    produces/consumes them: the type defs + their members + producers/consumers + interface/impl."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import state as ST
+    rg = idx["rg"]
+    sg = idx.get("state") or ST.build_state_graph(rg, os.path.abspath(repo))
+    if isinstance(types, str):
+        types = [t.strip() for t in re.split(r"[,\s]+", types) if t.strip()]
+    ids = ST.lineage(sg, rg, types)
+    rows = ST.render(rg, ids)
+    if not rows:
+        known = ", ".join(sorted(sg["type_def"])[:20])
+        return f"no lineage for {types}. State types include e.g.: {known}"
+    return f"# State lineage for {types}\n" + "\n".join(rows)
 
 
 def impact_text(target, repo):

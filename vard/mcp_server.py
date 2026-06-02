@@ -76,6 +76,29 @@ def vard_resource(name: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_state_candidates(task: str, repo: str) -> str:
+    """STATE-FIRST localization, step 1. Returns the program's candidate STATE types (its data
+    structures, narrowed to the region relevant to the task). Read them and identify which hold the
+    WRONG state for this task — INCLUDING state the task doesn't name but is structurally involved
+    (the config/settings/payload/entity behind the described behavior). Then call vard_state_lineage
+    with those type names. Use this when a bug is about data being wrong/stale/incomplete and the
+    code that sets it isn't obvious from the symptom text."""
+    return cli.state_candidates_text(task, repo)
+
+
+@mcp.tool()
+@_safe
+def vard_state_lineage(types: str, repo: str) -> str:
+    """STATE-FIRST localization, step 2. Given state type names you identified (comma/space
+    separated, e.g. "CreationSettings, MockNameImpl"), returns the code that DEFINES and
+    PRODUCES/CONSUMES that state: the type definitions, their members, the methods that build/read
+    them, and interface/impl. This is where a 'wrong state' bug is actually fixed — including
+    producers in other modules that have no textual link to the symptom."""
+    return cli.state_lineage_text(types, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_index(repo: str, fresh: bool = False) -> str:
     """Build/refresh the VARD index (attention graph + data-resource layer). Key-free by default."""
     s = cli.build_index(repo, fresh=fresh)

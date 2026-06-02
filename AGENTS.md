@@ -19,6 +19,7 @@ MCP tools load. (`vard rules --write` re-applies just the routing block if you e
 |---|---|
 | locate code — "where is X", "what handles Y", understand a feature, gather context before a change | `vard_context("<task in plain words>")` (CLI: `vard context "..."`) — use its `file:line` spans as your starting set, **before** grepping |
 | before editing code that touches shared state | `vard_impact("<QualifiedName or file.py:line>")` — readers/writers coupled through caches/DBs/queues |
+| data is wrong / stale / incomplete and the code that sets it isn't obvious | `vard_state_candidates("<task>")` → identify which state types are wrong (incl. ones the symptom doesn't name) → `vard_state_lineage("TypeA, TypeB")` for the code that defines + produces/consumes that state |
 | trace a data resource | `vard_resource("<table / cache-key / queue>")` — who writes vs reads it |
 | see hidden couplings | `vard_couplings` |
 
