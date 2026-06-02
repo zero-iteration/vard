@@ -79,7 +79,8 @@ def self_test():
     chunks, keys, bm = M.CH.chunk_index(nodes, repo)
     lex = M.CH.topk_ids(M.CH.lexical_scores(task, keys, bm), 10)
     sem = M.CH.topk_ids(M.CH.semantic_scores(task, nodes, keys, chunks, repo), 10)
-    reach = M.CH.structural_reach_files(idx, task, nodes)
+    seed_files = {rg.nodes[i].file for i in (lex | sem)}
+    reach = M.CH.structural_reach_files(idx, seed_files, hops=1)
     print(f"  lexical@10={len(lex)}  semantic@10={len(sem)}  structural_files={len(reach)}")
     got = R.vard_codefirst(idx, task, repo, k=8)
     print(f"  codefirst returned {len(got)} ids; sample: {sorted(got)[:3]}")

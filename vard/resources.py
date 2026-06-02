@@ -63,6 +63,14 @@ STRONG_DB_READ = {"findbyid", "findone", "findall", "findoneby", "getbyid", "que
                   "get_or_404", "findoneorfail", "findmany"}
 STRONG_DB_WRITE = {"save", "saveall", "persist", "deletebyid", "upsert", "bulk_create",
                    "createmany", "updatemany", "insertone", "updateone", "deleteone", "insertmany"}
+# cache methods that COLLIDE with plain Map/collection/Optional ops — require strong cache evidence,
+# else a logging HashMap.put("provider", ...) gets misread as a cache:provider write.
+_AMBIG_CACHE = {"put", "get", "set", "delete", "remove", "keys", "exists", "mget", "mset"}
+_STRONG_CACHE_RX = re.compile(r"redis|cache|jedis|redisson|memcache|opsfor|caffeine|valkey|ehcache", re.I)
+_STRONG_CACHE_BASE = {"redistemplate", "stringredistemplate", "jedis", "redisson", "cachemanager",
+                      "opsforvalue", "opsforhash"}
+_TEST_FILE = re.compile(r"(/test/|/tests/|/it/|test\.java$|tests\.java$|it\.java$|itcase\.java$|"
+                        r"_test\.|\.test\.|\.spec\.|__tests__)", re.I)
 
 
 class ResourceExtractor:
@@ -74,6 +82,8 @@ class ResourceExtractor:
 
     def _add(self, fn_id, rtype, key, kind):
         if not key or not fn_id or fn_id not in self.rg.nodes:
+            return
+        if _TEST_FILE.search(self.rg.nodes[fn_id].file):   # don't couple through test code
             return
         rid = f"{rtype}:{key}"
         self.res_nodes.setdefault(rid, {"type": rtype, "key": key})
@@ -96,10 +106,18 @@ class ResourceExtractor:
             rl = recv.lower()
             base = _last_id(rl)
             is_cache_recv = base in crecv or "redis" in rl or "cache" in rl or "memcache" in rl
+            vt = getattr(self.rg, "var_types", {}).get(cs.file, {})
+            # for Map-colliding methods (put/get/...), require STRONG cache evidence (the receiver's
+            # name or declared type is actually redis/cache), not a generic name like client/conn —
+            # else a logging map.put("provider", ...) is misread as a cache write.
+            ctype = (vt.get(_last_id(recv), "") or "").lower()
+            is_strong_cache = (bool(_STRONG_CACHE_RX.search(rl)) or bool(_STRONG_CACHE_RX.search(ctype))
+                               or base in _STRONG_CACHE_BASE)
+            cache_ok = is_cache_recv and (m not in _AMBIG_CACHE or is_strong_cache)
             # CACHE (checked first; 'set'/'get' are cache, not db)
-            if m in cwrite and is_cache_recv:
+            if m in cwrite and cache_ok:
                 self._add(fid, "cache", _norm_key(cs.arg0), "writes")
-            elif m in cread and is_cache_recv:
+            elif m in cread and cache_ok:
                 self._add(fid, "cache", _norm_key(cs.arg0), "reads")
             # QUEUE producer
             elif m in qattr:

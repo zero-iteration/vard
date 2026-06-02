@@ -366,6 +366,34 @@ producer (the 0/7 -> found cases). This bug was outside that sweet spot.
 TAKEAWAY: VARD's value = localization cost (0 tokens) + recall on bugs the agent can't find; NOT end-to-end fix
 tokens on easy findable bugs (agent reads the code anyway).
 
+## Run 15 — DOES THE DB EARN ITS EXISTENCE? whole_picture vs agent+git (the decisive test)
+
+Gave an agent the same repo + FULL git access (git log/blame allowed) and asked for the same whole picture
+(coupling / key decision / co-changes) for UserServiceImpl. vs vard_whole_picture (0 LLM tokens).
+
+| dimension | vard_whole_picture (0 tok) | agent+git (48,037 tok, 9 tools, 54s) |
+|---|---|---|
+| coupling | cache:cacheKey -> 3 files (vague) | found the REAL auth:user:token_version key + mechanism + dismissed false positives (captcha) — MORE precise |
+| decision | faf6754 only | found 289f79c (JWT tokenVersion, VARD MISSED) + faf6754 — RICHER |
+| co-changes | raw counts | same + reasoned |
+
+VERDICT: for git/code-reconstructable context, the agent MATCHED-OR-BEAT the DB on capability (deeper, caught what
+VARD missed); the DB won ONLY on cost/latency (0 vs 48k tokens, instant vs 54s). Cost-efficiency alone is a weak
+moat vs a "good enough" improving model. CRUCIAL: everything tested was IN the repo+git = the agent's home turf;
+the test had nothing the agent couldn't reach. => the git-mined DB competes on the agent's turf and loses on
+capability. The DB earns its existence ONLY on NON-RECONSTRUCTABLE data: business rules, off-repo decisions, Jira
+discussions, incident postmortems, tribal knowledge — which the agent CANNOT get at any token cost because it is
+not in the repo. THAT is the only thing that beats "agent + git is good enough" => the WRITE path is the product,
+not the mined read path. Next fair test: put a real non-reconstructable rule/decision in the DB and show the
+agent cannot get it on its own.
+
+## Methodology guardrails (must hold whenever VARD-vs-agent numbers are written up)
+- Any VARD-vs-agent run on the CURRENT indexed repo is HISTORY-LEAKAGE-INFLATED: VARD's history/state
+  signals have seen those commits. The ONLY trustworthy numbers are from the dark-gold / held-out harness
+  indexed at the PARENT commit. Report those; treat retro-runs on master as upper bounds, not results.
+- Per Run 8: coupling-class bug COMMITS are rare in public history, so bug-recovery evidence is capped at
+  n≈2 strong + mechanism validation. State that ceiling wherever results are reported.
+
 ## Next
 1. Precision v2: select only query-IMPLICATED resources (not all of a kind); producer-only refs (return-type==T
    convertors) instead of all referencers. Target: closure back toward the hand-built ~18.

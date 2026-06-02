@@ -62,6 +62,22 @@ def _return_type_types(repo, n, cache, typenames):
     return {t for t in _CAP.findall(m.group(1)) if t in typenames} if m else set()
 
 
+def _mutated_types(txt, typenames):
+    """Types whose instance is MUTATED here: a var that receives `.setX(...)` and is declared with a
+    repo type (incl. `List<T> v`, `for (T v : ...)`, a method param `T v`). Catches the real write
+    sites (e.g. setSupplierInFare(Fare fare){ fare.setSupplier(...) }) that construct/return miss."""
+    setters = set(re.findall(r'\b(\w+)\s*\.\s*set[A-Z]\w*\s*\(', txt))
+    out = set()
+    for var in setters:
+        m = re.search(r'\b([A-Z]\w+)\s*(?:<[^>]*>)?\s+' + re.escape(var) + r'\b', txt)
+        if m and m.group(1) in typenames:
+            out.add(m.group(1))
+        m2 = re.search(r'\bList\s*<\s*([A-Z]\w+)\s*>\s+' + re.escape(var) + r'\b', txt)
+        if m2 and m2.group(1) in typenames:
+            out.add(m2.group(1))
+    return out
+
+
 def build_state_graph(rg, repo):
     """Compute the state graph from the symbol graph + on-disk source. Stored in the index.
     Returns a picklable dict: type_def, type_refs, up/down (interface<->impl), resources, holders."""
@@ -88,7 +104,8 @@ def build_state_graph(rg, repo):
         # producers of a type: nodes that construct / build / return it (the "writers" of that state)
         prod = ({t for t in _NEW.findall(txt) if t in typenames}
                 | {t for t in _BUILDER.findall(txt) if t in typenames}
-                | _return_type_types(repo, n, cache, typenames))
+                | _return_type_types(repo, n, cache, typenames)
+                | _mutated_types(txt, typenames))
         for t in prod:
             if t != n.name:
                 producers.setdefault(t, set()).add(n.id)
@@ -151,9 +168,24 @@ def candidates(sg, rg, seed_files=None, task="", max_n=400):
     if len(names) > max_n and seed_files:
         near = {t for t in names for did in sg["type_def"].get(t, []) if rg.nodes[did].file in seed_files}
         names = near or names
-    # rank: data-like types (the actual STATE the agent should pick) first, service/infra last
+
+    _DATA_DIR = ("/model/", "/models/", "/dto/", "/entity/", "/entities/", "/vo/", "/bo/", "/co/",
+                 "/domain/", "/pojo/", "/payload/", "/event/", "/events/", "/record/")
+    _SVC_DIR = ("/service/", "/controller/", "/handler/", "/config/", "/util", "/transformer/",
+                "/client/", "/aspect/", "/filter/", "/provider/")
+
+    def _paths(t):
+        return [rg.nodes[d].file.lower() for d in sg["type_def"].get(t, [])]
+
+    def is_data(t):
+        return bool(_DATA_LIKE.search(t)) or any(s in p for p in _paths(t) for s in _DATA_DIR)
+
+    def is_svc(t):
+        return bool(_NONDATA.search(t)) or any(s in p for p in _paths(t) for s in _SVC_DIR)
+
+    # rank: actual STATE (data POJOs/DTOs/entities, by name OR package) first; service/infra last
     def rank(t):
-        return (0 if _DATA_LIKE.search(t) else (2 if _NONDATA.search(t) else 1), t)
+        return (0 if is_data(t) else (2 if is_svc(t) else 1), t)
     return sorted(names, key=rank)[:max_n]
 
 

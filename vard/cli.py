@@ -110,6 +110,13 @@ def build_index(repo, fresh=False, llm=None, extra_roots=None):
     llm: optional agent LLM for discovery."""
     repo = _project_root(repo)
     extra_roots = [os.path.abspath(r) for r in (extra_roots or []) if os.path.isdir(r)]
+    if not os.environ.get("VARD_NO_DEPS"):              # auto-discover co-located source deps by default
+        try:
+            from . import deps as DEP
+            disc = [os.path.abspath(d) for d in DEP.discover_source_deps(repo) if os.path.isdir(d)]
+            extra_roots = sorted(set(extra_roots) | set(disc))
+        except Exception:
+            pass
     os.makedirs(os.path.join(repo, VDIR), exist_ok=True)
     try:
         from . import discover as D
