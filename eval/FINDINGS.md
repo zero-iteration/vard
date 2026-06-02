@@ -439,6 +439,30 @@ NEXT LEVERS (unsolved at scale): producer<->consumer-only edges (drop read-read 
 source), FIELD/COLUMN-level resolution (couple on the mutated field not the whole entity), cache-key
 TEMPLATE resolution (match_confidence). No vard/ code modified — eval/coupling_compare.py + eval/edges2.py.
 
+## Run 18 — field-sensitive value-flow construction (eval/valueflow.py), from the research synthesis
+
+Idea 2 (SVF-inspired): couple on the specific FIELD of a type (T.f write -> read), not the whole type.
+
+| repo | construction | baseline r@10 | random r@10 | MRR | coverage |
+|---|---|:--:|:--:|:--:|:--:|
+| youlai | v2 (whole type) | 0.124 | 0.065 | 0.93 | 0.21 |
+| youlai | vf (field) | 0.210 | 0.301 | 0.85 | 0.22 |
+| KCloud | v2 (whole type) | 0.008 | 0.009 | 1.00 | 0.05 |
+| KCloud | vf (field) | 0.039 | 0.093 | 1.00 | 0.04 |
+
+Field-sensitivity made coupling SPARSE + PRECISE (MRR->1.00) but UNDER-connected (coverage ~0.04) -> can't
+move recall above random. Opposite failure of v2 (over-connect). Only v2-on-moderate-repo beat random.
+
+DEEPEST HONEST FINDING (proven from the construction side now): MRR = 0.85-1.00 across EVERY construction +
+method. Pattern is invariant: when VARD's coupling fires, the #1 candidate is a real co-change partner, but
+coupling rarely fires -> low recall. This is NOT tunable by construction, because CO-CHANGE RECALL IS THE WRONG
+SCOREBOARD for data-coupling: most co-change is feature/refactor, not shared-state, so no shared-state
+construction can score high co-change recall — the ceiling is inherent to the proxy. Product shape is therefore
+HIGH-PRECISION / LOW-RECALL (a confident sparse "you'll also break X", not a recall-complete list).
+Caveats: field value-flow here is a CRUDE regex approximation (proper AST def-use would be cleaner — "vf lost"
+is partly "proxy is rough"); co-change ground truth is confounded. To measure construction properly needs a real
+data-coupling ground truth (hand-labeled write->read), not co-change. No vard/ code modified.
+
 ## Methodology guardrails (must hold whenever VARD-vs-agent numbers are written up)
 - Any VARD-vs-agent run on the CURRENT indexed repo is HISTORY-LEAKAGE-INFLATED: VARD's history/state
   signals have seen those commits. The ONLY trustworthy numbers are from the dark-gold / held-out harness
