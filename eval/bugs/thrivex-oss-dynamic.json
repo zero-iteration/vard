@@ -1,0 +1,12 @@
+{
+  "id": "thrivex-oss-dynamic",
+  "repo_url": "https://github.com/LiuYuYang01/ThriveX-Server",
+  "repo_dir": "~/.vard-eval/repos/ThriveX-Server",
+  "base_commit": "0b969b2",
+  "fix_commit": "6eccc21",
+  "issue_text": "After changing the file-storage settings through the admin API (for example switching the active storage provider), uploads keep using the previous provider until the application is restarted. The new configuration is saved but is not applied at runtime; the active settings are only loaded once when the application starts.",
+  "bug_class": "coupling",
+  "issue_text_source": "normalized-english (blind to fix location; symptom only)",
+  "notes": "Pattern: in-memory shared config state (messier MyBatis-Plus repo, no DDD). Writer (update settings) does not refresh the in-memory holder that the upload path reads; state loaded once at startup. Tests whether the lineage rule connects writer<->reader through an in-memory holder + whether the partner is textually dark.",
+  "gold": []
+}

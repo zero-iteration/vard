@@ -1,0 +1,12 @@
+{
+  "id": "thrivex-comment-email",
+  "repo_url": "https://github.com/LiuYuYang01/ThriveX-Server",
+  "repo_dir": "~/.vard-eval/repos/ThriveX-Server",
+  "base_commit": "b7c79a5",
+  "fix_commit": "806eea0",
+  "issue_text": "When a visitor submits a blog comment without providing an email address, the comment-notification email is sent twice. Sending the email also blocks the request, making commenting slow. A comment with a valid email should notify once; a comment without an email should not error or double-send.",
+  "bug_class": "logic",
+  "issue_text_source": "normalized-english (blind to fix location; symptom only)",
+  "notes": "Control bug. Gold files are named for comment/email, so conventional search should reach them => expected NOT dark. Validates that the harness reports VARD ~= agent on findable bugs.",
+  "gold": []
+}

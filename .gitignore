@@ -18,3 +18,4 @@ __pycache__/
 
 # local agent config (machine-specific hook paths)
 .claude/
+.gstack/

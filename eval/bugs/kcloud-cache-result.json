@@ -1,0 +1,12 @@
+{
+  "id": "kcloud-cache-result",
+  "repo_url": "https://github.com/KouShenhai/KCloud-Platform-IoT",
+  "repo_dir": "~/.vard-eval/repos/KCloud-Platform-IoT",
+  "base_commit": "a0bb77d",
+  "fix_commit": "2137680",
+  "issue_text": "Admin list endpoints (users, departments, roles, menus) work on the first request but fail on later requests once the response has been cached in Redis. Reading the cached value back throws a Jackson error about not being able to construct an instance / missing type information. Time fields also come back in an inconsistent format after a cache round-trip. The standard API response wrapper must round-trip correctly through the cache.",
+  "bug_class": "coupling",
+  "issue_text_source": "normalized-english (blind to fix location; symptom only, gold class names not mentioned)",
+  "notes": "Hypothesis coupling-class: cache writer (@Cacheable put) and reader (cache get) coupled only through the Redis key; fix lives in the serialized state shapes (Result<T> + the *CO DTOs + convertor), which never mention 'cache'. Dark-gold expected on Result/DeptCO (base versions carry no Jackson/cache text).",
+  "gold": []
+}

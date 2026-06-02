@@ -1,0 +1,11 @@
+{
+  "id": "owner-repo-001",
+  "repo_url": "https://github.com/owner/repo",
+  "name": "repo",
+  "base_commit": "<sha immediately BEFORE the fix>",
+  "fix_commit": "<sha of the accepted fix / merge>",
+  "issue_text": "Paste the issue title + body as the agent would see it. No file names you wouldn't naturally know. This is the query.",
+  "bug_class": "coupling",
+  "notes": "Why coupling: e.g. fix writes Order.status in OrderService and reads it in StatusProjector with no call between them.",
+  "gold": []
+}
