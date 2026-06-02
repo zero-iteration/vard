@@ -1,164 +1,175 @@
 # VARD
 
-**A fast, local retrieval layer that gives AI coding agents the right code for a task — including the code coupled through *shared data* (caches, DBs, queues) that grep, embeddings, and call-graphs all miss.**
+**A fast, local retrieval + memory layer for AI coding agents.** It indexes your whole project once,
+then answers — in ~1s, with no LLM in the loop — *where the relevant code is*, *what data/state a task
+touches*, *what's coupled through shared data* (caches, DBs, queues), and *why the code is the way it
+is* (decisions/tickets/incidents from history). It finds context; the model still does the reasoning
+and the edit. Local and key-optional by default.
 
-<!-- demo: record a short clip per docs/README.md, save it as docs/usage.gif, and uncomment ↓ -->
-<!-- <p align="center"><img src="docs/usage.gif" alt="VARD usage demo" width="720"></p> -->
+## Contents
 
+- [Why](#why)
+- [Install](#install)
+- [Quick start](#quick-start)  — index, then query
+- [What VARD gives the agent](#what-vard-gives-the-agent)
+- [Multi-module projects & dependencies](#multi-module-projects--dependencies)
+- [How it works](#how-it-works)
+- [Results](#results)
+- [Configuration](#configuration)
+- [Security & privacy](#security--privacy)
+- [Status](#status)
 
-VARD finds context. It does not write code. It is a retrieval layer that runs *before* the model, so a coding agent (or you) starts from the right files and the hidden couplings instead of grepping for them. Local and key-optional by default.
+## Why
 
-## The idea
+When you ask an agent to change code, two things go wrong that a flat search (grep / embeddings) can't
+fix:
 
-When you ask an AI to fix a bug, the hardest context is often the *invisible* file. A background worker writes a value to a cache key; a web handler reads it later. Change one and the other breaks — yet there is **no call, no import, no shared text, and no semantic similarity** between them. Every text/embedding/call-graph retriever is blind to this. VARD makes the link explicit.
+1. **Invisible couplings.** A background job writes a value to a cache key; a handler reads it later.
+   Change one and the other breaks — yet there's no call, no import, no shared text, no semantic
+   similarity between them. Every text/embedding/call-graph retriever is blind to this.
+2. **Missing the whole picture.** The agent reads the code but not the *state* it flows through, the
+   readers it would break, or the decision/incident that shaped it — context that isn't reconstructable
+   from the file in front of it.
 
-```text
-$ vard context "the status page shows stale data"
-
-## Directly relevant
-- monitor.py:49-58              get_status           ← what grep / embeddings already find
-
-## Coupled through shared data (grep/embeddings miss these)
-- tasks/maintenance.py:84-117   refresh_queries      ⮂ writes redis:status that get_status reads
-                                                       ← the actual root cause
-```
-
-In one real repo (redash) that root-cause writer ranked **#450 by grep and #180 by a state-of-the-art embedding model** — effectively unfindable. VARD links it directly through the shared `redis:status` key.
-
-## Results
-
-The metric VARD is built for is **file localization**: given an issue, are the files that actually need changing in the top-k?
-
-**On SWE-bench Verified** (109 real GitHub issues; gold = the files the accepted patch edits), free local embeddings, ~1s/query, no LLM in the loop:
-
-| top-k | found the right file (any@k) | recall@k |
-|------:|:----------------------------:|:--------:|
-|   1   | 0.35 | 0.32 |
-|   5   | 0.67 | 0.64 |
-|  10   | **0.75** | **0.74** |
-|  20   | 0.84 | 0.83 |
-
-**vs other retrievers** (on **ContextBench**, a public benchmark of real GitHub issues with human-annotated gold context — every row scored on the same set):
-
-| retriever | file recall @10 | file recall @40 | line/span recall @10 |
-|---|:--:|:--:|:--:|
-| Aider repo-map (PageRank) | 0.11 | 0.27 | ~0.01 |
-| BM25 (lexical) | 0.52 | 0.67 | ~0.01 |
-| **VARD** | **0.60** | **0.79** | **0.61** |
-
-~5× the Aider repo map at file level, and **50–70× better at the line-range level** — because VARD returns precise `file:start-end` spans, not whole files. (It is *not* trying to beat a full agentic search loop on file recall; those reach similar numbers but cost many LLM calls. VARD gets there in ~1s with no model.)
-
-**Recovering data-coupled code** — the writer/reader on the *other side* of a cache key / DB row / queue that also breaks if you change one side. "Can each method find the coupled partner?" (top-10, on real apps):
-
-| method | finds it | cross-module (the hard case) |
-|---|:--:|:--:|
-| grep / lexical | 52% | 26% |
-| embeddings (SOTA) | 68% | 53% |
-| call / import / inherit graph | 44% | 60% |
-| **VARD resource graph** | **100%** | **100%** |
-
-**12% of all couplings (20% cross-module) are found by VARD alone** — no text, embedding, or call-graph signal surfaces them. This is the part nothing else does.
-
-**Token cost — the point of all this.** In a controlled comparison (n=15) — an agent reading whole files in relevance order until it has seen all the gold code, vs. reading the precise spans VARD returns:
-
-| | tokens to reach the relevant code | files / spans opened |
-|---|:--:|:--:|
-| blind agent (whole files) | ~209,700 | ~233 files |
-| **with VARD (precise spans)** | **~6,000** | **~35 spans** |
-
-Treat the raw multiple as an **upper bound** — a real agent greps and reads files partially, it wouldn't open 233 whole files. But the shape is the point: VARD hands the model the relevant code in a small fraction of the context, which lines up with the 40–95% token savings reported for context pre-feeding. Less wasted context = fewer tokens, fewer tool-calls, and less attention spent on noise.
-
-**It generalizes.** Validated on Python (SWE-bench Verified) and Java / Spring Boot (two unseen apps). On a repo the models had **not** memorized: given only the issue text, a frontier model located the right file in **0 of 8** cases on its own; with VARD's retrieved context, **6 of 8** — and produced working fixes for several.
-
-**The context matters more than the model.** On real Spring Boot bugs (n=4; fresh Claude subagents, no API key, judged against the official fix commit), each model first saw only the issue text, then the issue plus VARD's retrieved spans:
-
-| model | issue text only | + VARD context |
-|---|:--:|:--:|
-| Opus 4.8 | 0/4 | 2/4 |
-| Sonnet 4.5 | 0/4 | 2/4 |
-
-Without code, both hallucinated file paths and APIs and fixed nothing (memorization didn't save them). With VARD's context both fixed the same bugs — and **Sonnet 4.5 + VARD matched Opus 4.8.** The deciding factor was the retrieved context, not the model: a cheaper model with the right spans reached what the expensive one did. (Small n, LLM-judged, directional — read it as the model-equivalence signal, not a resolution rate.)
-
-**Honest scope.** VARD is a localization/retrieval layer; the model still does the reasoning and the patch. Samples are small-to-medium (ContextBench n=30, SWE-bench Verified n=109); the resolution figures are directional, not a `%Resolved` leaderboard result (it isn't one, and isn't comparable to one).
+VARD builds a queryable index that makes those explicit, so the agent starts from the right place
+instead of rediscovering it (expensively) every time.
 
 ## Install
 
 ```bash
 git clone https://github.com/zero-iteration/vard && cd vard
-pip install -e .                  # base: BM25 + symbol graph + data-coupling (no API key, fully local)
+pip install -e .                  # base: BM25 + symbol graph + state + data-coupling (no key, fully local)
 pip install -e ".[embeddings]"    # + local semantic embeddings (free, bge-small) — recommended
 pip install -e ".[all]"           # + OpenAI option + MCP server + `vard learn`
 ```
 
-Python 3.10+. The base install needs no API key and your code never leaves the machine. Without the `[embeddings]` extra VARD runs BM25 + graph + coupling and tells you it's doing so.
+Python 3.10+. The base install needs no API key and your code never leaves the machine.
 
-## Usage (CLI)
+## Quick start
 
-Run from inside the repo (path defaults to `.`):
-
-```bash
-vard init        # the only command you need to remember
-```
-
-`vard init` does everything: indexes the repo, **writes a routing block to your `CLAUDE.md`/`AGENTS.md`** so your agent uses VARD automatically, and **registers the MCP server** (if Claude Code is installed). After it, just describe a task to your agent — it'll call VARD on its own. Re-run anytime; it's idempotent and re-indexes only changed files. (`vard init --no-wire` to only index.)
-
-The other commands exist but you rarely type them — your agent calls these (or their `vard_*` MCP equivalents):
+**1 — Index** (run anywhere inside the project; it finds the project root and indexes every module):
 
 ```bash
-vard context "<bug or task>"               # relevant code + coupled partners, with reasons
-vard couplings                             # hidden writer⇄reader data couplings
-vard impact OrderService.updateStatus      # blast radius before an edit
-vard resource redis:status                 # who reads/writes a cache key / table / queue
-vard learn                                 # optional: tune ranking weights from this repo's git history
+vard init
 ```
 
-## Use it with an agent (MCP)
+`vard init` indexes the whole project, **writes a routing block to `CLAUDE.md`/`AGENTS.md`** so your
+agent uses VARD automatically, and **registers the MCP server** (if Claude Code is present). It's
+idempotent and re-indexes only changed files. (`--no-wire` to only index; `--fresh` to rebuild.)
 
-`vard init` already registers the MCP server and writes the agent routing block — so **just run `vard init` and restart your agent.** Then describe a task in plain English and it calls `vard_context` / `vard_impact` itself; no need to say "use vard."
+**2 — Query.** Just describe a task to your agent and it calls VARD on its own. Or from the CLI:
 
-If you'd rather wire it by hand (or use Cursor/another client): `claude mcp add vard -- vard-mcp`, and `vard rules --write` to (re)apply the routing block. Tools exposed: `vard_context`, `vard_impact`, `vard_resource`, `vard_couplings`, `vard_index`, plus agent-driven discovery (`vard_discovery_request` / `vard_set_ruleset`). See [`AGENTS.md`](AGENTS.md) for the agent-facing guide.
+```bash
+vard context "<bug or task>"          # relevant code + data-coupled partners
+vard whole-picture OrderService       # code + state + couplings + the why (decisions/tickets/incidents) + co-changes
+vard impact OrderService.updateStatus # blast radius before an edit
+vard resource redis:status            # who reads/writes a cache key / table / queue
+```
 
-Optional pre-edit hook — warns the agent automatically when it edits code coupled through shared state:
+## What VARD gives the agent
+
+These are the MCP tools (and CLI equivalents) the agent calls. See [`AGENTS.md`](AGENTS.md) for the
+agent-facing guide.
+
+| tool | use it for |
+|---|---|
+| `vard_context(task)` | relevant code for a task, **including** the functions coupled through shared data. Call before grepping. |
+| `vard_whole_picture(target)` | the full picture before editing: the code, the **state** it touches, the code **coupled** through shared data (what you'd break), the **decisions/tickets/incidents** behind it, and what **co-changes** with it. |
+| `vard_state_candidates(task)` → `vard_state_lineage(types)` | state-first localization: when data is wrong/stale/incomplete and the code that sets it isn't obvious, see the program's state types, identify the wrong one(s), then get the code that defines and **produces/consumes** that state — including producers in other modules with no textual link to the symptom. |
+| `vard_impact(target)` | readers/writers coupled through caches/DBs/queues that an edit would affect. |
+| `vard_resource(name)` | who writes vs reads a given cache key / table / queue. |
+| `vard_couplings()` | all implicit writer⇄reader data couplings in the repo. |
+
+Optional pre-edit hook — warns the agent when it edits code coupled through shared state:
 
 ```bash
 vard install-hook            # current repo   (--global for all your repos)
 ```
 
+## Multi-module projects & dependencies
+
+`vard init` run anywhere in a Maven/Gradle project walks up to the **reactor / root project** and
+indexes **all** modules — so cross-module couplings, state, and history live in one graph (bounded by
+the git root; `VARD_NO_REACTOR=1` to index only the current dir).
+
+It also indexes **source dependencies it can find** — co-located modules/repos whose `artifactId`
+matches a declared dependency — so the agent isn't blind to a dependency module's code. Add roots
+explicitly when they live elsewhere:
+
+```bash
+vard init --with ../shared-lib --with ../another-service
+```
+
+Only **source** is indexed (tree-sitter needs source); a binary-only jar with no local source isn't.
+
 ## How it works
 
-Two phases. Index time is heavy and runs once (incremental after); query time is ~1s.
+Two phases. Indexing is heavy and runs once (incremental after); queries are ~1s with no model.
 
 ```text
 INDEX (once, cached in <repo>/.vard/):
-  source → tree-sitter language providers → uniform symbols + call-sites
-         → symbol graph (typed edges: contains, inherits)
-         → DATA-RESOURCE layer:  writer ─writes→ cache:key ←reads─ reader   (implicit coupling made explicit)
-         → commit-history mining  +  file-level import graph
+  source → tree-sitter providers → symbols + call-sites
+         → SYMBOL graph        (typed edges: contains, inherits)
+         → STATE graph         (types/fields as the data; producers/consumers via def-use)
+         → DATA-RESOURCE layer (writer ─writes→ cache:key ←reads─ reader: implicit coupling made explicit)
+         → commit-history mining + file-level import graph
 
 QUERY (per task):
-  score each symbol by its BEST-matching passage:  0.5·embedding + 0.5·BM25 over the whole method
-    + commit-history (files similar past changes touched)
-    + graph-PPR (files relevant code depends on, via the import graph)
-    + optional HyDE (a hypothetical-code hint the agent can supply)
-  → top-k precise spans · data-coupled partners · structurally-reachable candidates
+  rank symbols by best-matching passage (0.5·embedding + 0.5·BM25 over the method)
+    + commit-history + import-graph propagation
+  → precise file:line spans · data-coupled partners · (on request) state lineage + the why
 ```
 
-Design notes worth knowing:
+Notes worth knowing:
+- **Passage-level units** — a method scores by its single best-matching passage, so a few relevant
+  lines in a large method still surface instead of being averaged away.
+- **State is the spine for "wrong-data" bugs** — every type is state; code attaches as what produces/
+  consumes it. The agent names the implicated state (reasoning), VARD traverses it (structure).
+- **Stack-agnostic coupling** — no framework hardcoded; built-in heuristics by default, or opt into an
+  LLM ruleset with `VARD_DISCOVER=openai`, or let the agent supply one.
 
-- **Passage-level units.** Each method is split into passages; a method scores by its single best-matching passage, so a few relevant lines inside a large method still surface instead of being averaged away.
-- **Learned, weighted fusion.** Signal weights come from a learned reranker; a learned combination beats naive equal-weight fusion, so auxiliaries are weighted *below* the content backbone, never summed flat.
-- **Language-agnostic core.** Everything above the tree-sitter providers is language-independent; adding a language is one config entry.
-- **Stack-agnostic coupling.** VARD hardcodes no framework. It infers how *your* repo talks to caches/DBs/queues from its dependencies and call patterns (built-in heuristics by default; opt into an LLM with `VARD_DISCOVER=openai` or let the agent supply it).
+## Results
 
-### On the name — what "attention" means here
+VARD's core metric is **file localization**: given an issue, are the files that need changing in the
+top-k? On **SWE-bench Verified** (109 real GitHub issues; gold = the files the accepted patch edits),
+free local embeddings, ~1s/query, no LLM in the loop:
 
-"Repository attention" is a metaphor for **selectively attending to the few relevant regions of a large repo** — it is *not* transformer attention (no query/key/value, no learned softmax over nodes). The component that genuinely plays that role is **relevance propagation over the import graph**: VARD seeds the files whose code matches the task, then lets that relevance *diffuse along dependency edges* via personalized PageRank, so a file is surfaced when relevant code depends on it even if its own text doesn't match. That is graph diffusion — the pre-neural cousin of attention (cf. [APPNP](https://arxiv.org/abs/1810.05997), "attention as personalized PageRank") — deterministic and ~instant.
+| top-k | found the right file (any@k) | recall@k |
+|------:|:----------------------------:|:--------:|
+|   5   | 0.67 | 0.64 |
+|  10   | **0.75** | **0.74** |
+|  20   | 0.84 | 0.83 |
 
-We did build and test the learned, softmax-style alternatives (a trained logistic router, a task-conditioned GNN, a calibrated probability layer). None beat the simpler deterministic scoring + graph propagation, so VARD doesn't ship one. The real edge isn't a novel attention mechanism — it's the **data-coupling signal** (the table above) plus span-level retrieval.
+**vs other retrievers** on **ContextBench** (public benchmark, human-annotated gold, same set):
 
-## Languages
+| retriever | file recall @10 | line/span recall @10 |
+|---|:--:|:--:|
+| Aider repo-map | 0.11 | ~0.01 |
+| BM25 (lexical) | 0.52 | ~0.01 |
+| **VARD** | **0.60** | **0.61** |
 
-Python, Java (incl. Spring Boot), JavaScript / TypeScript (Node), Go.
+~5× the Aider repo-map at file level and far higher at the line level, because VARD returns precise
+`file:start-end` spans, not whole files.
+
+**Recovering data-coupled code** — the writer/reader on the other side of a cache key / DB row / queue
+(top-10, on real apps). This is the part nothing else does:
+
+| method | finds the partner | cross-module (the hard case) |
+|---|:--:|:--:|
+| grep / lexical | 52% | 26% |
+| embeddings | 68% | 53% |
+| call / import graph | 44% | 60% |
+| **VARD resource graph** | **100%** | **100%** |
+
+**Token cost.** Localizing the relevant code costs VARD ~0 LLM tokens (it's local + deterministic),
+versus an agent that searches and reads files to find the same code — tens of thousands of tokens per
+task. VARD hands the model the relevant spans directly, so less of the context window is spent on
+search and noise.
+
+**Scope & honesty.** VARD finds context; the model reasons and patches. Localization (above) is the
+trusted, held-out metric. The state-lineage and whole-picture layers are validated on real bugs but on
+small samples — treat them as mechanism-proven, not leaderboard numbers. Coupling-class bugs are rare
+in public history, so that evidence is necessarily small-n.
 
 ## Configuration
 
@@ -166,18 +177,27 @@ Python, Java (incl. Spring Boot), JavaScript / TypeScript (Node), Go.
 |---|---|
 | `VARD_EMB_MODEL` | embedding backend. Default `BAAI/bge-small-en-v1.5` (local, free). `none` = BM25 only. `openai:text-embedding-3-large` = cloud. |
 | `VARD_DISCOVER` | `openai` to opt into LLM-based resource discovery (default: free built-in heuristics, no API call). |
+| `VARD_NO_REACTOR` | `1` to index only the given directory instead of walking up to the project root. |
+| `VARD_NO_DEPS` | `1` to skip auto-discovery of co-located source dependencies. |
 | `OPENAI_API_KEY` | only used if you opt into OpenAI embeddings/discovery (also read from `~/.config/vard/openai.key`). |
 | `VARD_DEBUG` | `1` to print full tracebacks instead of one-line errors. |
 
+Languages: Python, Java (incl. Spring Boot), JavaScript / TypeScript (Node), Go.
+
 ## Security & privacy
 
-- **No code execution.** VARD only parses your source statically; it never runs the code it analyzes.
-- **Local and key-free by default.** Nothing leaves the machine unless you opt into OpenAI. When you do, only dependency manifests and call-pattern summaries are sent for discovery — never your full source.
-- **The index is a local pickle** at `<repo>/.vard/index.pkl` (git-ignored by the provided `.gitignore`). As with any pickle, don't run `vard` against a `.vard/index.pkl` from an untrusted source — delete it and let VARD rebuild.
+- **No code execution.** VARD parses source statically; it never runs the code it analyzes.
+- **Local and key-free by default.** Nothing leaves the machine unless you opt into OpenAI; even then,
+  only dependency manifests and call-pattern summaries are sent for discovery — never your full source.
+- **The index is a local pickle** at `<repo>/.vard/index.pkl` (git-ignored). As with any pickle, don't
+  run `vard` against a `.vard/index.pkl` from an untrusted source — delete it and let VARD rebuild.
 
 ## Status
 
-Early but working end-to-end: multi-language, self-maintaining incremental index, MCP server + pre-edit hook, key-free by default, graceful degradation (a bad file, missing dependency, or absent network never crashes it). Roadmap: cross-service coupling (the same idea across multiple repos / microservices).
+Early but working end-to-end: multi-language, multi-module, self-maintaining incremental index, MCP
+server + pre-edit hook, key-free by default, graceful degradation (a bad file, missing dependency, or
+absent network never crashes it). Roadmap: a write path for curated, non-reconstructable knowledge
+(decisions, business rules, incidents) appended to the same graph; cross-service coupling.
 
 ## License
 

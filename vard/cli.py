@@ -476,6 +476,9 @@ def main():
     px = sub.add_parser("context"); px.add_argument("task"); px.add_argument("repo", nargs="?", default="."); px.add_argument("-k", type=int, default=8); px.add_argument("--hypothetical", default=None)
     pm = sub.add_parser("impact"); pm.add_argument("target"); pm.add_argument("repo", nargs="?", default=".")
     pr = sub.add_parser("resource"); pr.add_argument("name"); pr.add_argument("repo", nargs="?", default=".")
+    pw = sub.add_parser("whole-picture"); pw.add_argument("target"); pw.add_argument("repo", nargs="?", default=".")
+    psc = sub.add_parser("state-candidates"); psc.add_argument("task"); psc.add_argument("repo", nargs="?", default=".")
+    psl = sub.add_parser("state-lineage"); psl.add_argument("types"); psl.add_argument("repo", nargs="?", default=".")
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
     pu = sub.add_parser("uninstall-hook"); pu.add_argument("repo", nargs="?", default="."); pu.add_argument("--global", dest="glob", action="store_true")
     pl = sub.add_parser("learn"); pl.add_argument("repo", nargs="?", default="."); pl.add_argument("--sample", type=int, default=150)
@@ -528,6 +531,12 @@ def _dispatch(a):
         print(impact_text(a.target, a.repo))
     elif a.cmd == "resource":
         print(resource_text(a.name, a.repo))
+    elif a.cmd == "whole-picture":
+        print(whole_picture_text(a.target, a.repo))
+    elif a.cmd == "state-candidates":
+        print(state_candidates_text(a.task, a.repo))
+    elif a.cmd == "state-lineage":
+        print(state_lineage_text(a.types, a.repo))
     elif a.cmd == "install-hook":
         print(install_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "uninstall-hook":
