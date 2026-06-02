@@ -387,6 +387,58 @@ not in the repo. THAT is the only thing that beats "agent + git is good enough" 
 not the mined read path. Next fair test: put a real non-reconstructable rule/decision in the DB and show the
 agent cannot get it on its own.
 
+## Run 16 — RWR vs bipartite-inverted-index vs current, validated on git co-change (eval/coupling_compare.py)
+
+Both ideas consume VARD's EXISTING resource edges (tests retrieval, not edge construction). Ground truth =
+git co-change (held-out validation; confounded proxy). n=11 (youlai) / 38 (KCloud) targets, 2 repos.
+
+| method | KCloud r@10 | youlai r@10 | coverage |
+|---|:--:|:--:|:--:|
+| baseline (current, shared-resource count) | 0.091 | 0.149 | 0.09-0.15 |
+| bipartite (idf x mode x mutability, noisy-OR) | 0.091 | 0.149 | 0.09-0.15 |
+| RWR (projected weighted graph + restart) | 0.269 | 0.673 | 1.0 |
+| RANDOM (rank the resource-touching pool) | 0.267 | 0.758 | 1.0 |
+
+VERDICT (both ideas LOSE on current edges):
+- RWR ≈ RANDOM (KCloud 0.269 vs 0.267 — identical; youlai random higher). Its recall over baseline is pure
+  VOLUME (gold ⊆ the small resource-touching pool; top-k covers it by size), not ranking signal. Multi-hop adds
+  no real coupling signal here — confirms the user's own idea-2 analysis ("multi-hop goes noisy; graph solves a
+  problem you don't have").
+- bipartite == baseline EXACTLY: reweighting is moot when the 1-hop candidate set per file is tiny (few direct
+  sharers) — nothing to re-rank. Needs DENSE edges to matter.
+- THE REAL BOTTLENECK = edge construction: coverage 0.09-0.15 means detected resource-coupling explains only
+  ~10% of co-change; the other ~90% has no detected edge. Swapping retrieval (current->bipartite->RWR) moves
+  nothing. Exactly the user's idea-2 conclusion: "RWR sits downstream of edge construction; the win is the edge
+  signal (match_confidence / key-resolution via AST/dataflow), not RWR-vs-BFS."
+- Positive: current coupling is HIGH-PRECISION/LOW-RECALL (MRR ~0.97-0.99) — when it fires, the partner is #1-2.
+Caveats: co-change confounded (caps recall for ALL methods); verdict conditional on current edge sparsity (with
+denser/better edges, re-test — bipartite/RWR could then differentiate); small n. No vard/ code modified.
+
+## Run 17 — rethink node/edge CONSTRUCTION: types/entities as shared-state resources (eval/edges2.py)
+
+Generalized "resource" from cache/queue/table to DOMAIN TYPES (a type produced by one file, referenced
+by another = coupling; IDF over file-fanout = native hub correction). Re-ran the co-change harness.
+
+| repo | model | baseline r@10 | random r@10 | coverage |
+|---|---|:--:|:--:|:--:|
+| youlai (263f) | v1 cache/queue/table | 0.149 | 0.759 | 0.15 |
+| youlai | v2 +types | 0.129 | **0.066** | 0.21 |
+| youlai | v2-tight (data-only, <=15 fanout) | 0.114 | 0.073 | 0.15 |
+| KCloud (1998f) | v1 | 0.091 | 0.265 | 0.09 |
+| KCloud | v2 +types | 0.008 | 0.009 | 0.05 |
+| KCloud | v2-tight | 0.012 | 0.018 | 0.01 |
+
+VERDICT: construction was the lever (confirms Run 16). On a MODERATE repo (youlai), adding type/entity
+resources flips baseline/bipartite from LOSING to random (v1) to BEATING random ~2x (v2) with higher
+coverage + MRR 0.92-0.94 = real coupling signal where v1 had none. But it does NOT scale: on a large
+monorepo (KCloud) type-coupling OVER-CONNECTS (1117 of 1998 files) and dilutes to ~random even tightened;
+file-level "shared type" is too coarse there. Persistent: bipartite==baseline (weighting still doesn't
+separate — retrieval is second-order; CONSTRUCTION moved the needle); MRR high everywhere (top-1 precision
+is fine, recall/coverage is the gap; co-change is a confounded proxy capping recall for ALL methods).
+NEXT LEVERS (unsolved at scale): producer<->consumer-only edges (drop read-read = the over-connection
+source), FIELD/COLUMN-level resolution (couple on the mutated field not the whole entity), cache-key
+TEMPLATE resolution (match_confidence). No vard/ code modified — eval/coupling_compare.py + eval/edges2.py.
+
 ## Methodology guardrails (must hold whenever VARD-vs-agent numbers are written up)
 - Any VARD-vs-agent run on the CURRENT indexed repo is HISTORY-LEAKAGE-INFLATED: VARD's history/state
   signals have seen those commits. The ONLY trustworthy numbers are from the dark-gold / held-out harness
