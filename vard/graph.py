@@ -55,9 +55,13 @@ class RepoGraph:
         return out
 
 
-def build_graph(repo_dir):
+def build_graph(repo_dir, extra_roots=None):
     """Multi-language graph via language providers (python/java/js/ts/go). Produces a
-    RepoGraph + rg.call_sites + rg.node_decorators + rg.var_types for the resource layer."""
+    RepoGraph + rg.call_sites + rg.node_decorators + rg.var_types for the resource layer.
+
+    extra_roots: additional source dirs (e.g. dependency modules outside the repo tree). Their files
+    are stored with paths relative to repo_dir (may be `../...`), so everything that joins repo_dir +
+    rel still resolves — letting one graph span the whole multi-module project + source deps."""
     from . import languages as L
     rg = RepoGraph(repo_dir)
     rg.call_sites = []
@@ -66,11 +70,17 @@ def build_graph(repo_dir):
     name_index = defaultdict(list)            # class simple-name -> [node ids] for inherits
     exts = L.supported_extensions()
     files = []
-    for root, dirs, fs in os.walk(repo_dir):
-        dirs[:] = [d for d in dirs if d not in CODE_SKIP_DIRS]
-        for f in fs:
-            if os.path.splitext(f)[1].lower() in exts:
-                files.append(os.path.relpath(os.path.join(root, f), repo_dir))
+    seen_abs = set()
+    for base in [repo_dir] + list(extra_roots or []):
+        for root, dirs, fs in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in CODE_SKIP_DIRS]
+            for f in fs:
+                if os.path.splitext(f)[1].lower() in exts:
+                    ab = os.path.join(root, f)
+                    if ab in seen_abs:
+                        continue
+                    seen_abs.add(ab)
+                    files.append(os.path.relpath(ab, repo_dir))
     rg.skipped = 0
     for rel in files:
         prov = L.provider_for(rel)

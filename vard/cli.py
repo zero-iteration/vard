@@ -91,9 +91,25 @@ def _wire_mcp(repo):
     return f"couldn't auto-register MCP; run:  claude mcp add vard -- {mcp_bin}"
 
 
-def build_index(repo, fresh=False, llm=None):
-    """Build & cache the attention graph + resource layer. llm: optional agent LLM for discovery."""
+def _project_root(repo):
+    """Resolve to the multi-module project root (Maven reactor / Gradle root) so we index the WHOLE
+    project, not just the dir pointed at. Set VARD_NO_REACTOR=1 to index only the given dir."""
     repo = os.path.abspath(repo)
+    if os.environ.get("VARD_NO_REACTOR"):
+        return repo
+    try:
+        from . import deps as DEP
+        return DEP.find_project_root(repo)
+    except Exception:
+        return repo
+
+
+def build_index(repo, fresh=False, llm=None, extra_roots=None):
+    """Build & cache the attention graph + resource layer. Indexes the whole multi-module project
+    (reactor root) plus any extra source roots (dependency modules outside the tree).
+    llm: optional agent LLM for discovery."""
+    repo = _project_root(repo)
+    extra_roots = [os.path.abspath(r) for r in (extra_roots or []) if os.path.isdir(r)]
     os.makedirs(os.path.join(repo, VDIR), exist_ok=True)
     try:
         from . import discover as D
@@ -101,8 +117,19 @@ def build_index(repo, fresh=False, llm=None):
         src = "agent" if llm else ("openai" if os.environ.get("VARD_DISCOVER", "").lower() == "openai" else "default")
     except Exception as e:
         rs, src = R.DEFAULT_RULESET, f"default ({str(e)[:40]})"
+    try:
+        from . import deps as DEP
+        mods = DEP.find_modules(repo)
+        if mods:
+            print(f"→ vard: multi-module project — indexing {len(mods)+1} modules from {os.path.basename(repo)}/",
+                  file=sys.stderr, flush=True)
+        if extra_roots:
+            print(f"→ vard: + {len(extra_roots)} extra source root(s): "
+                  + ", ".join(os.path.basename(r) for r in extra_roots), file=sys.stderr, flush=True)
+    except Exception:
+        pass
     print("→ vard: parsing source files (tree-sitter)...", file=sys.stderr, flush=True)
-    rg = G.build_graph(repo)            # multi-language (python/java/js/ts/go)
+    rg = G.build_graph(repo, extra_roots=extra_roots)   # whole project + extra source roots
     nfiles = len({n.file for n in rg.nodes.values()}); skipped = getattr(rg, "skipped", 0)
     msg = f"→ vard: {len(rg.nodes)} symbols across {nfiles} files"
     if skipped:
@@ -141,7 +168,8 @@ def build_index(repo, fresh=False, llm=None):
     try:
         with open(_index_path(repo), "wb") as f:
             pickle.dump({"rg": rg, "ruleset": rs, "fingerprint": Fr.fingerprint(repo), "history": hist,
-                         "import_edges": import_edges, "res": res, "state": state_graph}, f)
+                         "import_edges": import_edges, "res": res, "state": state_graph,
+                         "extra_roots": extra_roots}, f)
     except Exception as e:
         raise RuntimeError(f"could not write index to {_index_path(repo)}: {e}") from e
     gs = rg.stats()
@@ -163,6 +191,7 @@ def load_index(repo):
 def fresh_index(repo):
     """Persistent + self-updating: instant when the repo is unchanged; re-index only
     when files changed (graph rebuild is cheap; embeddings update only for changed code)."""
+    repo = _project_root(repo)
     idx = load_index(repo)
     cur = Fr.fingerprint(repo)
     if idx is None:
@@ -171,7 +200,7 @@ def fresh_index(repo):
     if not Fr.is_fresh(idx.get("fingerprint", {}), cur):
         changed, deleted = Fr.diff(idx.get("fingerprint", {}), cur)
         print(f"→ vard: repo changed ({len(changed)} modified, {len(deleted)} removed) — re-indexing...", file=sys.stderr)
-        build_index(repo); return load_index(repo)
+        build_index(repo, extra_roots=idx.get("extra_roots")); return load_index(repo)
     return idx   # unchanged → instant
 
 
@@ -433,6 +462,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     pi = sub.add_parser("init"); pi.add_argument("repo", nargs="?", default="."); pi.add_argument("--fresh", action="store_true")
     pi.add_argument("--no-wire", action="store_true", help="just index; don't touch CLAUDE.md or register the MCP server")
+    pi.add_argument("--with", dest="with_roots", action="append", default=[], metavar="PATH",
+                    help="extra source root to index (e.g. a dependency module/repo outside the tree); repeatable")
+    pi.add_argument("--deps", action="store_true", help="auto-discover + index co-located source dependencies")
     pc = sub.add_parser("couplings"); pc.add_argument("repo", nargs="?", default="."); pc.add_argument("--limit", type=int, default=40)
     px = sub.add_parser("context"); px.add_argument("task"); px.add_argument("repo", nargs="?", default="."); px.add_argument("-k", type=int, default=8); px.add_argument("--hypothetical", default=None)
     pm = sub.add_parser("impact"); pm.add_argument("target"); pm.add_argument("repo", nargs="?", default=".")
@@ -458,7 +490,18 @@ def main():
 
 def _dispatch(a):
     if a.cmd == "init":
-        s = build_index(a.repo, a.fresh)
+        extra = list(getattr(a, "with_roots", []) or [])
+        if getattr(a, "deps", False):
+            try:
+                from . import deps as DEP
+                found = DEP.discover_source_deps(_project_root(a.repo))
+                if found:
+                    print(f"  • found {len(found)} co-located source dep(s): "
+                          + ", ".join(os.path.basename(d) for d in found))
+                extra += found
+            except Exception as e:
+                print(f"  • dep discovery skipped ({str(e)[:40]})")
+        s = build_index(a.repo, a.fresh, extra_roots=extra)
         print(f"✓ indexed {s['repo']}  (ruleset: {s['ruleset_source']})")
         print(f"  code: {s['code_nodes']} nodes / {s['code_edges']} edges")
         print(f"  resources: {s['resources']}, {s['resource_edges']} read/write edges")
