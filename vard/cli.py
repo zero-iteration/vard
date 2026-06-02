@@ -37,6 +37,10 @@ Use it proactively, without being asked:
   call `vard_state_candidates("<task>")` to see the program's state types, identify which hold the WRONG
   state (including state the symptom doesn't name), then `vard_state_lineage("TypeA, TypeB")` to get the code
   that defines and produces/consumes it — including producers in other modules with no textual link to the bug.
+- **Before editing a file, or whenever you need the whole picture (not just the code)**: call
+  `vard_whole_picture("<Class or file>")` — it joins the code, the state it touches, the code coupled
+  through shared data, the decisions/tickets/incidents behind it (why it's this way, from history), and
+  what co-changes with it. This is context you cannot reconstruct by reading the code.
 - Skip VARD for trivial edits to a file you already have open.
 
 If the MCP tools aren't loaded, the CLI is equivalent: `vard context "..."`, `vard impact <name>`,
@@ -325,6 +329,17 @@ def state_lineage_text(types, repo):
         known = ", ".join(sorted(sg["type_def"])[:20])
         return f"no lineage for {types}. State types include e.g.: {known}"
     return f"# State lineage for {types}\n" + "\n".join(rows)
+
+
+def whole_picture_text(target, repo):
+    """The relational WHOLE PICTURE for a file/symbol: code + state it touches + coupled state +
+    the decisions/tickets/incidents behind it (from history) + what co-changes with it. The context
+    an agent can't reconstruct from code alone."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import memory as MEM
+    return MEM.whole_picture(idx, os.path.abspath(repo), target)
 
 
 def impact_text(target, repo):

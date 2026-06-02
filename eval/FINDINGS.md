@@ -344,6 +344,28 @@ Caveats: n=5 (10/15 java-verified failed checkout — unreachable SHAs); Context
 that NAME the target API -> easy localization, not dark; VARD's recall edge is breadth (8 spans vs agent's 2-3
 precise files) — agent wins on PRECISION; agent arm can't scale (153k tokens / 7min for 5) while VARD is free.
 
+## Run 14 — full BUG-FIX head-to-head with the PACKAGED vard (honest counter-result)
+
+youlai-boot current-user bug. Both arms = subagents that localize AND specify the fix. Arm A: plain (own
+search). Arm B: given packaged-vard context (`vard context` + `vard_state_lineage('CurrentUserDTO')`, ~1145 tok).
+
+| metric | Arm A plain | Arm B +VARD |
+|---|:--:|:--:|
+| fix correct vs gold | yes (both gold files) | yes (both gold files; roleNames as Set = exact gold) |
+| LLM tokens | 28,554 | 32,281 |
+| tool calls | 12 | 15 |
+| time | 85s | 109s |
+
+VARD did NOT save tokens here — cost slightly MORE. Honest reason: on a FINDABLE bug in a SMALL repo the agent
+localizes cheaply itself, so VARD's context is additive (Arm B read it AND still verified by reading the mapper /
+getUserProfile), not a substitute. A cautious agent re-verifies regardless. The token win only materializes if the
+agent TRUSTS the spans and skips its own search — which it didn't.
+Where VARD's token win IS real: (1) localization-only — VARD localized this same bug at 0 LLM tokens / 7.6s vs the
+agent's ~24k; (2) hard/dark bugs where the agent flails 100k+ tokens and still misses the textually-disconnected
+producer (the 0/7 -> found cases). This bug was outside that sweet spot.
+TAKEAWAY: VARD's value = localization cost (0 tokens) + recall on bugs the agent can't find; NOT end-to-end fix
+tokens on easy findable bugs (agent reads the code anyway).
+
 ## Next
 1. Precision v2: select only query-IMPLICATED resources (not all of a kind); producer-only refs (return-type==T
    convertors) instead of all referencers. Target: closure back toward the hand-built ~18.

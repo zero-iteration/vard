@@ -99,6 +99,18 @@ def vard_state_lineage(types: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_whole_picture(target: str, repo: str) -> str:
+    """THE WHOLE PICTURE before you touch a file/symbol — call this before editing or when you need
+    full context, not just the code. Given a class or file (e.g. "UserServiceImpl"), returns one
+    joined answer: the code here, the STATE/data it touches, the code COUPLED through shared
+    data (what you'd break), the DECISIONS / TICKETS / INCIDENTS behind it (why it's this way, mined
+    from history), and the files that historically CHANGE TOGETHER with it. This is context you
+    cannot reconstruct by reading the code — the 'why', the hidden couplings, the history."""
+    return cli.whole_picture_text(target, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_index(repo: str, fresh: bool = False) -> str:
     """Build/refresh the VARD index (attention graph + data-resource layer). Key-free by default."""
     s = cli.build_index(repo, fresh=fresh)
