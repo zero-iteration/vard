@@ -28,6 +28,15 @@ _QUEUE_Q = re.compile(r'\b(kafka|queue|topic|consum|publish|listener|message|eve
 _STATIC_FIELD = re.compile(r'\bstatic\s+(?!final\b)([A-Za-z_][\w.<>\[\]]*)\s+([A-Za-z_]\w*)\s*[=;]')
 _LOGGER = re.compile(r'(?:Logger|Logger<.*>|^Log|Slf4j)$')
 _MAX_REFS = 40
+_GOD_PRODUCER_CAP = 25
+# producer signals: constructs / builds / returns a type
+_NEW = re.compile(r'\bnew\s+([A-Z]\w+)\s*[(<]')
+_BUILDER = re.compile(r'\b([A-Z]\w+)\.builder\s*\(')
+# data-likeness for candidate ranking (state the agent should pick) vs service/infra
+_DATA_LIKE = re.compile(r'(DTO|VO|DO|CO|BO|Entity|Model|Request|Response|Event|Form|Bean|Payload|'
+                        r'Record|Result|Data|Info|Message|Settings|Config|State|Snapshot)$')
+_NONDATA = re.compile(r'(Impl|Transformer|Client|Handler|Manager|Listener|Provider|Resolver|Validator|'
+                      r'Interceptor|Aspect|Filter|Job|Task|Runner|Scheduler|Executor|Helper)$')
 
 
 def _content_nodes(rg):
@@ -69,13 +78,20 @@ def build_state_graph(rg, repo):
             up.setdefault(u, set()).add(v)
             down.setdefault(v, set()).add(u)
 
-    cache, type_refs, resources, holders = {}, {}, [], {}
+    cache, type_refs, producers, resources, holders = {}, {}, {}, [], {}
     deco = getattr(rg, "node_decorators", {})
     for n in content:
         txt = _node_text(repo, n, cache)
         refs = {t for t in _CAP.findall(txt) if t in typenames and t != n.name}
         for t in refs:
             type_refs.setdefault(t, set()).add(n.id)
+        # producers of a type: nodes that construct / build / return it (the "writers" of that state)
+        prod = ({t for t in _NEW.findall(txt) if t in typenames}
+                | {t for t in _BUILDER.findall(txt) if t in typenames}
+                | _return_type_types(repo, n, cache, typenames))
+        for t in prod:
+            if t != n.name:
+                producers.setdefault(t, set()).add(n.id)
         anns = " ".join(deco.get(n.id, []))
         if _CACHE_ANN.search(anns):
             st = {t for t in _return_type_types(repo, n, cache, typenames) if not _INFRA.search(t)}
@@ -90,6 +106,7 @@ def build_state_graph(rg, repo):
     # store sets as sorted lists for clean pickling
     return {"type_def": type_def,
             "type_refs": {t: sorted(ids) for t, ids in type_refs.items()},
+            "producers": {t: sorted(ids) for t, ids in producers.items()},
             "up": {k: sorted(v) for k, v in up.items()},
             "down": {k: sorted(v) for k, v in down.items()},
             "resources": resources, "holders": holders}
@@ -105,7 +122,15 @@ def _type_closure(sg, name, rg):
         out |= {v for _, v, k in rg.G.out_edges(did, keys=True) if k == "contains"}
     refs = sg["type_refs"].get(name, [])
     if len(refs) <= _MAX_REFS:
-        out |= set(refs)
+        out |= set(refs)                                   # ordinary type: all referencers
+    else:
+        # god-type (referenced everywhere): don't drop everything — keep the PRODUCERS (writers of
+        # this state), which is what a 'wrong state' bug needs. Rank producers that also touch a
+        # resource (cache/queue) first — those are the ones that store/derive the state — and cap.
+        prods = sg.get("producers", {}).get(name, [])
+        res_ids = {nid for nid, _, _ in sg.get("resources", [])}
+        prods = sorted(prods, key=lambda nid: (nid not in res_ids, nid))[:_GOD_PRODUCER_CAP]
+        out |= set(prods)
     return out
 
 
@@ -122,15 +147,14 @@ def candidates(sg, rg, seed_files=None, task="", max_n=400):
     """The state types the agent chooses from. For big repos, narrowed to types whose def lives in or
     near (1 import hop) the files the search surfaced — structural, so textually-disconnected state is
     kept. seed_files: files of the content-top hits."""
-    names = sorted({t for t in sg["type_def"] if not _INFRA.search(t)})
-    if len(names) <= max_n or not seed_files:
-        return names[:max_n]
-    near = set()
-    for t in names:
-        for did in sg["type_def"].get(t, []):
-            if rg.nodes[did].file in seed_files:
-                near.add(t)
-    return sorted(near)[:max_n]
+    names = {t for t in sg["type_def"] if not _INFRA.search(t)}
+    if len(names) > max_n and seed_files:
+        near = {t for t in names for did in sg["type_def"].get(t, []) if rg.nodes[did].file in seed_files}
+        names = near or names
+    # rank: data-like types (the actual STATE the agent should pick) first, service/infra last
+    def rank(t):
+        return (0 if _DATA_LIKE.search(t) else (2 if _NONDATA.search(t) else 1), t)
+    return sorted(names, key=rank)[:max_n]
 
 
 def auto_implicated(sg, rg, task, seed_ids):
@@ -159,6 +183,16 @@ def auto_implicated(sg, rg, task, seed_ids):
     for hid, stypes in sg["holders"].items():
         if hid in seedset or rg.nodes.get(hid) and rg.nodes[hid].file in seed_files:
             out |= set(stypes)
+    if not out:
+        # fallback so the zero-shot section isn't empty: the data-like types the content seeds
+        # reference (capped, data-only — stays precise, doesn't flood on logic bugs).
+        scored = {}
+        for t, refs in sg["type_refs"].items():
+            if _DATA_LIKE.search(t) and not _INFRA.search(t):
+                hits = len(set(refs) & seedset)
+                if hits:
+                    scored[t] = hits
+        out |= set(sorted(scored, key=scored.get, reverse=True)[:3])
     return out
 
 

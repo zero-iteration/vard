@@ -68,33 +68,62 @@ def find_modules(root):
 
 
 _DEP = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
+_PKG_ART = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
+
+
+def _artifact_id(d):
+    """The module's OWN artifactId (first <artifactId> after the optional <parent> block in its pom).
+    Matching on this — not the directory name — is robust when dir-name != artifactId (common)."""
+    p = os.path.join(d, "pom.xml")
+    if not os.path.isfile(p):
+        return None
+    try:
+        txt = open(p, errors="ignore").read()
+    except Exception:
+        return None
+    # skip the <parent> artifactId if present
+    txt = re.sub(r"<parent>.*?</parent>", "", txt, flags=re.S)
+    m = _PKG_ART.search(txt)
+    return m.group(1) if m else None
 
 
 def discover_source_deps(root, search_dirs=None):
-    """Best-effort: source of DECLARED dependencies that lives locally outside the reactor — a sibling
-    workspace project whose artifactId matches a dependency. Returns extra source-root dirs. Conservative:
-    only sibling dirs of the project root, only Java/Gradle projects, only matching declared artifactIds."""
+    """Source of DECLARED dependencies that lives locally outside the reactor. Matches a candidate
+    module by its OWN <artifactId> (robust to dir-name != artifactId), and descends ONE level into
+    sibling reactor projects (e.g. ../flights-common-data/flights-models). Bounded to 1 level."""
     artifacts = set()
     for dp, _, fs in os.walk(root):
-        if "pom.xml" in fs:
+        if "pom.xml" in fs and dp.count(os.sep) - root.count(os.sep) <= 3:
             try:
                 artifacts |= set(_DEP.findall(open(os.path.join(dp, "pom.xml"), errors="ignore").read()))
             except Exception:
                 pass
-        if dp.count(os.sep) - root.count(os.sep) > 3:
-            continue
     if not artifacts:
         return []
-    siblings = search_dirs or [os.path.dirname(os.path.abspath(root))]
+    rootabs = os.path.abspath(root)
     found = []
-    for base in siblings:
+
+    def consider(d):
+        if os.path.abspath(d) == rootabs or not os.path.isdir(d):
+            return
+        aid = _artifact_id(d)
+        if aid and aid in artifacts and _has_build(d):
+            found.append(os.path.abspath(d))
+
+    for base in (search_dirs or [os.path.dirname(rootabs)]):
         try:
-            for name in os.listdir(base):
-                d = os.path.join(base, name)
-                if d == os.path.abspath(root) or not os.path.isdir(d):
-                    continue
-                if name in artifacts and _has_build(d):
-                    found.append(d)
+            entries = os.listdir(base)
         except Exception:
             continue
-    return found
+        for name in entries:
+            d = os.path.join(base, name)
+            if not os.path.isdir(d):
+                continue
+            consider(d)                                   # the sibling itself
+            if _has_build(d):                             # sibling is a reactor -> descend 1 level
+                try:
+                    for sub in os.listdir(d):
+                        consider(os.path.join(d, sub))
+                except Exception:
+                    pass
+    return sorted(set(found))

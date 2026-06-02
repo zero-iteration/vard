@@ -7,12 +7,24 @@ the hidden couplings, the history), which flat memory (CLAUDE.md / grep / vector
 This is the read/mined layer; a write path (append curated decisions / Jira / postmortems) is the
 natural extension — same schema, richer sources.
 """
-import os, re, subprocess, collections
+import os, re, json, subprocess, collections
 from . import state as ST
 
 _TICKET = re.compile(r'(?:#(\d+)|\b([A-Z][A-Z0-9]+-\d+)\b)')
 _FIX = re.compile(r'\b(fix|bug|hotfix|revert|regression|incident|broke|broken)\b|修复|错误|问题', re.I)
 _CODE_EXT = (".java", ".py", ".ts", ".tsx", ".js", ".jsx", ".go")
+_TEST = re.compile(r'(/test/|/tests/|/it/|Test\.java$|Tests\.java$|IT\.java$|ITCase\.java$|'
+                   r'_test\.|\.test\.|\.spec\.|__tests__)', re.I)
+
+
+def _load_tickets(repo):
+    """Optional ticket-id -> summary map (the intent/Jira corpus). Drop it at <repo>/.vard/tickets.json
+    to enrich the 'why' with the business symptom behind each [TF-XXXX], not just the terse commit."""
+    p = os.path.join(repo, ".vard", "tickets.json")
+    try:
+        return json.load(open(p)) if os.path.isfile(p) else {}
+    except Exception:
+        return {}
 
 
 def mine_changes(repo, limit=400):
@@ -55,10 +67,13 @@ def whole_picture(idx, repo, target, k=6):
     rg = idx["rg"]
     sg = idx.get("state") or ST.build_state_graph(rg, repo)
     mem = mine_changes(repo)
-    nodes = [n for n in rg.nodes.values() if target in n.qual or target in n.file]
-    if not nodes:
+    tickets_map = _load_tickets(repo)
+    cands = [n for n in rg.nodes.values() if target in n.qual or target in n.file]
+    if not cands:
         return f"no symbol/file matches '{target}'. Try a class name or a file path fragment."
-    tfile = nodes[0].file
+    # prefer the MAIN class over a test: exact name match, non-test path, class node
+    cands.sort(key=lambda n: ((n.name or "") != target, bool(_TEST.search(n.file)), n.type != "class"))
+    tfile = cands[0].file
     syms = [n for n in rg.nodes.values()
             if n.file == tfile and n.type in ("function", "method", "class")]
 
@@ -92,7 +107,12 @@ def whole_picture(idx, repo, target, k=6):
         for c in hist[:k]:
             tag = "INCIDENT/fix" if c["is_fix"] else "change"
             tix = f" [{','.join(c['tickets'])}]" if c["tickets"] else ""
-            out.append(f"- {c['date']} {c['sha']} ({tag}){tix}: {c['subject'][:80]}")
+            line = f"- {c['date']} {c['sha']} ({tag}){tix}: {c['subject'][:80]}"
+            # join the Jira/intent summary if we have the corpus — the business symptom, not just the commit
+            summ = next((tickets_map[t] for t in c["tickets"] if t in tickets_map), None)
+            if summ:
+                line += f"\n    ↳ {summ[:120]}"
+            out.append(line)
 
     co = mem["cochange"].get(tfile)
     if co:
