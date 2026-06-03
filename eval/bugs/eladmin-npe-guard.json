@@ -1,0 +1,1 @@
+{"id":"eladmin-npe-guard","repo_url":"https://github.com/elunez/eladmin","repo_dir":"/tmp/langsmoke/eladmin","base_commit":"164ce50","fix_commit":"e0af08ebdd","bug_class":"logic","issue_text":"A null value during code generation and menu handling can trigger a NullPointerException; missing defensive null checks crash the request instead of handling the empty case.","gold":[]}

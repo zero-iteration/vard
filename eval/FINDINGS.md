@@ -582,3 +582,24 @@ gold symbol that sits at rank 21/46 — past the top-8 SEED cutoff. This is exac
 (seeds=top-8 gates the whole expansion); deliberately NOT patched with a magic number. Principled lever to
 test next = scale the seed count, verified against all 12 bugs before changing. Strong honest result: on a
 repo it has never seen, pure retrieval scores 0.00 and the provenance pool recovers 89% of a hidden coupling.
+
+## Run 23 — normal (logic) bugs, fresh repo: does the pool ceiling hold off coupling?
+Tested 4 ordinary LOGIC bugs (negative control) registered fresh on an unseen repo, base-commit indexed,
+symptom-only issue text. (Note: the existing curated set is ALREADY mostly logic-labeled — 7 thrivex bugs —
+all at ceiling 1.00, so the pool result was never coupling-only.)
+
+| logic bug | codefirst@8 | pool ceiling |
+|---|:--:|:--:|
+| node-move-cycle (tree PID cycle on move) | 0.00 | 1.00 |
+| userlog-query (current-user log filter) | 0.00 | 1.00 |
+| findinset-query (set-membership cond) | 0.50 | 1.00 |
+| npe-guard (null checks, 2 modules) | 0.38 | 0.50 |
+
+3/4 at ceiling 1.00; codefirst stays low (0.00-0.50) even on logic bugs because gold is multi-symbol and
+top-8 content rarely captures all of it -> the pool's recall advantage holds for logic bugs too, not just
+coupling. The lone 0.50 (npe-guard) is a CURATION artifact: the commit bundled two INDEPENDENT null-guard
+fixes in unrelated modules (MenuServiceImpl + GeneratorServiceImpl) with no coupling/import/co-change between
+them; the pool caught the side the content seeds point at (menu, ranks 0-14) and missed the structurally
+disconnected side (generator, ranks 317-422). Honest takeaway: the pool recovers a bug's code when SOME
+signal connects it to the seeds; when a single "bug" is really two disconnected edits, it gets the connected
+half. Across coupling + logic, the failure mode is structural disconnection, not bug class.

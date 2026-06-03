@@ -342,10 +342,16 @@ def state_candidates_text(task, repo):
     seeds = sorted(score, key=score.get, reverse=True)[:10]
     seed_files = {rg.nodes[i].file for i in seeds}
     cands = ST.candidates(sg, rg, seed_files, task)
+    # IMPLICATED state (cache/queue/holder types the task points at) goes FIRST: these are the coupling
+    # payloads — e.g. the cached DTOs behind a "stale data" bug — that live in far modules and would be
+    # dropped by the seed-proximity narrowing. This is what lets the agent reach dark coupling state.
+    imp = sorted(ST.auto_implicated(sg, rg, task, set(seeds)))
+    cands = imp + [c for c in cands if c not in set(imp)]
     return ("# Candidate state types for: " + (task or "")[:120] + "\n"
-            "# Identify which of these hold/define the WRONG state (or that the fix must change) for "
-            "this task — including state the task does NOT name but is structurally involved — then "
-            "call vard_state_lineage with those type names.\n" + ", ".join(cands))
+            "# The first types are IMPLICATED by the task (cache/queue/shared-state it points at) — the most "
+            "likely coupling payloads. Identify which hold/define the WRONG state (or that the fix must "
+            "change), including state the task does NOT name but is structurally involved, then call "
+            "vard_state_lineage with those type names.\n" + ", ".join(cands))
 
 
 def state_lineage_text(types, repo):

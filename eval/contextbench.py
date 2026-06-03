@@ -32,11 +32,18 @@ def load_cb_bugs(split="contextbench_verified", lang="java", limit=None, max_rep
     rows = [r for r in rows if r.get("language") == lang]
     if limit:
         rows = rows[:limit]
+    no_clone = os.environ.get("VARD_CB_NOCLONE")        # only score repos already on disk (no new clones)
+    repo_cap = int(os.environ.get("VARD_CB_REPO_CAP", "0"))   # max instances per repo (0 = unlimited)
+    per_repo = {}
     bugs = []
     for r in rows:
         try:
             name = r["repo"].replace("/", "__")
             url = r.get("repo_url") or f"https://github.com/{r['repo']}"
+            if no_clone and not os.path.isdir(os.path.join(D.REPO_CACHE, name, ".git")):
+                continue
+            if repo_cap and per_repo.get(name, 0) >= repo_cap:
+                continue
             repo_dir = D._ensure_repo(url, name)
             _checkout_or_fetch(repo_dir, r["base_commit"])
             gold = []
@@ -46,6 +53,7 @@ def load_cb_bugs(split="contextbench_verified", lang="java", limit=None, max_rep
                 id=r["instance_id"][:48], issue_text=r["problem_statement"] or "",
                 bug_class="contextbench", repo_dir=os.path.abspath(repo_dir), gold=gold,
                 repo_url=url, base_commit=r["base_commit"]))
+            per_repo[name] = per_repo.get(name, 0) + 1     # count only successful loads toward the cap
         except Exception as e:
             print(f"  ! skip {r['instance_id'][:40]}: {str(e)[:70]}")
     return bugs

@@ -1,0 +1,1 @@
+{"id":"eladmin-userlog-query","repo_url":"https://github.com/elunez/eladmin","repo_dir":"/tmp/langsmoke/eladmin","base_commit":"d78e1de","fix_commit":"0e7c4fcbff","bug_class":"logic","issue_text":"The user-log query on the personal center page returns the wrong rows: logs are not correctly filtered to the current user, so a user sees the wrong log entries.","gold":[]}

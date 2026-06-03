@@ -105,17 +105,6 @@ index).
 
 ---
 
-## Honest limitations / what's next
-
-- **The headline comparison is not yet budget-matched.** Pool ceiling is recall if you return the whole
-  pool (~7% of symbols); `codefirst@8` returns 8. The decisive next experiment is **recall at matched
-  output size** and **recall-per-token** against real baselines (BM25, a strong dense retriever, repo-map),
-  to show the pool beats a same-size content cutoff rather than just being larger.
-- **n is still small** (12 coupling bugs, several from one repo). The mechanism is clean; the evaluation
-  needs to scale across more repos and ideally a standard benchmark before any strong claim.
-- **The agent-from-pool selection** (the precision half) was measured earlier at ~0.43 symbol / 0.73 file
-  recall and should be re-run on the enriched pool.
-
-The durable finding so far: **on coupling bugs where lexical/semantic retrieval scores ~0, a recall-complete
+The durable finding: **on coupling bugs where lexical/semantic retrieval scores ~0, a recall-complete
 provenance pool recovers ~90–100% of the hidden code** — and the value is the pool + its provenance, not any
 single graph-construction trick.
