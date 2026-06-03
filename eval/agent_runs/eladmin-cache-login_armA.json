@@ -1,0 +1,5 @@
+[
+  {"file":"eladmin-system/src/main/java/me/zhengjie/modules/security/service/dto/JwtUserDto.java","symbol":"JwtUserDto.getPassword","why":"getPassword() returns nested user.getPassword() (which is null after Redis round-trip) instead of the top-level password field the constructor was given; auth password check reads this and fails on cache hit"},
+  {"file":"eladmin-system/src/main/java/me/zhengjie/modules/system/service/dto/UserLoginDto.java","symbol":"UserLoginDto.password","why":"@JSONField(serialize=false) on password means it is dropped when JwtUserDto is serialized to Redis, so the cached login data has no password and the stale cache fails the password check"},
+  {"file":"eladmin-system/src/main/java/me/zhengjie/modules/security/service/dto/JwtUserDto.java","symbol":"JwtUserDto.password","why":"the standalone password field carries the real password into the cache but is never used by getPassword(); making auth read this serialized field is the likely fix surface"}
+]

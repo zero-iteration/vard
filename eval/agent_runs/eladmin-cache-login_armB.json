@@ -1,0 +1,22 @@
+[
+  {
+    "file": "eladmin-system/src/main/java/me/zhengjie/modules/security/service/UserCacheManager.java",
+    "symbol": "UserCacheManager.cleanUserCache",
+    "why": "Login-user cache eviction is @Async (fire-and-forget); after an admin edit it races/lags so the stale JwtUserDto (with the old password hash) survives until TTL expiry, making the login password check fail."
+  },
+  {
+    "file": "eladmin-system/src/main/java/me/zhengjie/modules/system/service/impl/UserServiceImpl.java",
+    "symbol": "UserServiceImpl.update",
+    "why": "Admin profile/role edit path; it saves the user and only calls delCaches->flushCache->cleanUserCache (async), so the login cache is not reliably/synchronously invalidated after the edit."
+  },
+  {
+    "file": "eladmin-system/src/main/java/me/zhengjie/modules/system/service/impl/UserServiceImpl.java",
+    "symbol": "UserServiceImpl.flushCache",
+    "why": "Sole hook that evicts the login-user cache (delegates to the async cleanUserCache); must guarantee synchronous eviction before login can re-read."
+  },
+  {
+    "file": "eladmin-system/src/main/java/me/zhengjie/modules/security/service/UserDetailsServiceImpl.java",
+    "symbol": "UserDetailsServiceImpl.loadUserByUsername",
+    "why": "Returns the cached JwtUserDto whose password is fed into passwordEncoder.matches() at login; serves stale cached credentials when the cache was not invalidated by the edit."
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "file": "laokou-common/laokou-common-i18n/src/main/java/org/laokou/common/i18n/dto/Result.java",
+    "symbol": "Result",
+    "why": "Declared `public final class` with only a private (code,msg,data) constructor and no no-arg ctor/@JsonCreator; under DefaultTyping.NON_FINAL Jackson omits type info for final classes and cannot instantiate it on cache read-back -> 'cannot construct instance / missing type information'."
+  },
+  {
+    "file": "laokou-common/laokou-common-redis/src/main/java/org/laokou/common/redis/config/JacksonCodec.java",
+    "symbol": "JacksonCodec.getJsonMapper",
+    "why": "activateDefaultTyping(validator, DefaultTyping.NON_FINAL, As.PROPERTY) plus binding OBJECT_REDIS_SERIALIZER to Object.class is what requires embedded @class type info; final Result and its generic `data` field are not tagged, so the round-trip fails and time fields deserialize to untyped values."
+  }
+]

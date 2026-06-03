@@ -1,0 +1,17 @@
+[
+  {
+    "file": "laokou-common/laokou-common-redis/src/main/java/org/laokou/common/redis/config/JacksonCodec.java",
+    "symbol": "JacksonCodec.getJsonMapper",
+    "why": "activateDefaultTyping(..., DefaultTyping.NON_FINAL, As.PROPERTY) is the Redis value mapper; NON_FINAL emits no type info for the final Result wrapper, so read-back as Object.class throws the Jackson 'cannot construct instance / missing type information' error. Typing strategy (or property style) must be changed so the wrapper round-trips."
+  },
+  {
+    "file": "laokou-common/laokou-common-i18n/src/main/java/org/laokou/common/i18n/dto/Result.java",
+    "symbol": "Result",
+    "why": "The standard API response wrapper that gets cached. Declared 'public final class' with only a private constructor and no @JsonTypeInfo/@JsonCreator, so DefaultTyping.NON_FINAL skips it and Jackson cannot reconstruct it from the cached value. Must be made deserializable (drop final / add type info / add a Jackson creator) so it round-trips."
+  },
+  {
+    "file": "laokou-common/laokou-common-core/src/main/java/org/laokou/common/core/config/HttpMessageConverterConfig.java",
+    "symbol": "HttpMessageConverterConfig.getJsonMapperBuilder",
+    "why": "Shared JsonMapper builder (LocalDateTime/Instant serializers + date format) reused by JacksonCodec; the time-field formatting that comes back inconsistent after a cache round-trip is governed here, so the time (de)serializer registration must be applied consistently to the cache mapper."
+  }
+]

@@ -603,3 +603,32 @@ them; the pool caught the side the content seeds point at (menu, ranks 0-14) and
 disconnected side (generator, ranks 317-422). Honest takeaway: the pool recovers a bug's code when SOME
 signal connects it to the seeds; when a single "bug" is really two disconnected edits, it gets the connected
 half. Across coupling + logic, the failure mode is structural disconnection, not bug class.
+
+## Run 24 — agent localization eval: Claude subagent + VARD tools vs + grep (LLM held constant)
+The "use an LLM agent to walk the graph" test, run with Claude SUBAGENTS as the walker (the Agent tool IS the
+LLM — no API budget needed). Fairer than "vs LocAgent" (uncrunnable here): hold the model fixed, vary only the
+tools. Arm A = Claude + VARD graph tools, STEERED to use the shipped state-first flow (implicated ->
+state_candidates -> lineage -> read). Arm B = Claude + generic shell (grep/find/cat). Scoring is FILE-level
+primary (credits valid alternative fix sites; exact-symbol-vs-single-gold is too harsh). Harness:
+eval/agent_eval.py + eval/vtool.sh + agent_tools.implicated. Bugs: 2 dark coupling bugs.
+
+| bug | gold | Arm A (VARD, steered) | Arm B (grep) |
+|---|--|:--:|:--:|
+| kcloud-cache-result | 7sym/6file | file 0.17 / sym 0.17 | file 0.17 / sym 0.17 |
+| eladmin-cache-login | 9sym/7file | file 0.29 / sym 0.29 | file 0.29 / sym 0.29 |
+
+RESULT: VARD ties grep on both. The graph gives a strong agent NO localization edge. Observations:
+- A capable agent reasons to plausible root causes from the symptom + a few reads, without needing the graph
+  (kcloud: both arms independently derived "Result is final + Jackson NON_FINAL typing omits @class").
+- When VARD HANDS it the gold payloads (implicated surfaced the COs), the agent REASONED THEM OUT
+  ("the COs carry @JsonTypeInfo, they round-trip; the gap is the wrapper") — an informed exclusion. Tool
+  availability != tool benefit when the walker is smart enough to override it.
+- The arms find DIFFERENT valid slices (eladmin: VARD->password-not-serialized side; grep->async-eviction
+  side; each ~0.29). Gold is one of several valid localizations, so neither is "wrong" and both score low.
+
+CONCLUSION: this is the "VARD ~= agent on a real repo" wall (the founding observation) measured at the
+agent-localization level with the LLM held constant. VARD's graph does not boost a strong agent's
+localization over grep. VARD's VALIDATED value is unchanged and orthogonal: a recall-complete, provenance-
+tagged CONTEXT layer (the pool) that beats weak retrieval (BM25/dense) at matched budget on coupling bugs
+(Run 20-23) — i.e. it helps WEAK retrieval reach dark gold, not a STRONG agent localize. n=2; a scaled run
+(eval/agent_eval.py is built for it) needs subagent budget, but the n=1->n=3 trend is consistent.
