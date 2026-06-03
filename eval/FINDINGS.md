@@ -463,6 +463,33 @@ Caveats: field value-flow here is a CRUDE regex approximation (proper AST def-us
 is partly "proxy is rough"); co-change ground truth is confounded. To measure construction properly needs a real
 data-coupling ground truth (hand-labeled write->read), not co-change. No vard/ code modified.
 
+## Run 19 — intra-procedural def-use slicing (ARISE-style) on gold LINES (eval/dataflow.py)
+
+Built lightweight line-based def-use; sliced each gold method from the query-relevant (lexical-seed) line,
+forward+backward; measured gold-line recall vs slice size. n=18 within-method gold sites.
+
+| bucket | n | avg method lines | slice gold-recall | slice size |
+|---|:--:|:--:|:--:|:--:|
+| all | 18 | 21 | 0.57 | 49% |
+| small <30 | 16 | 20 | 0.58 | 48% |
+| large >=30 | 2 | 30 | 0.50 | 56% |
+
+NEGATIVE: slicing halves the span but loses ~45% of gold lines at EVERY size (whole-method = recall 1.0 is
+safer). Reasons: VARD's bugs live in small methods (~21 lines) so the large-method line bottleneck ARISE
+targets barely occurs; gold edits (add field/guard/signature) aren't data-connected to the lexical seed; my
+def-use is crude vs ARISE's AST + agent-queried bidirectional slicing.
+
+## META-CONCLUSION of the construction arc (Runs 16-19)
+Tested RWR (=random), bipartite (=current), types-as-resources (beats random only moderate repo), field
+value-flow (high-precision/too-sparse), intra-procedural def-use slicing (loses gold). NONE beat current on
+these repos/bugs. The invariant real signal: MRR 0.85-1.0 — VARD's coupling/state is HIGH-PRECISION /
+LOW-RECALL (right when it fires, rarely fires). Construction tweaks don't move the needle because the bugs are
+small/findable, co-change is the wrong proxy, and lightweight static analysis loses more than it adds.
+RECOMMENDATION: stop tuning construction against these proxies; the validated value is the product shape
+(high-precision coupling + agent-identifies-state dark-gold recovery + whole-picture memory). To push
+construction fairly needs a REAL data-coupling ground truth (not co-change) + proper AST def-use on
+LARGE-METHOD repos. (eval/dataflow.py local, uncommitted per request.)
+
 ## Methodology guardrails (must hold whenever VARD-vs-agent numbers are written up)
 - Any VARD-vs-agent run on the CURRENT indexed repo is HISTORY-LEAKAGE-INFLATED: VARD's history/state
   signals have seen those commits. The ONLY trustworthy numbers are from the dark-gold / held-out harness
@@ -476,3 +503,82 @@ data-coupling ground truth (hand-labeled write->read), not co-change. No vard/ c
 2. Scale: expand curated set to ~15 bugs (more KCloud domain fixes + other repos/patterns) for a stable rate.
 3. Build bugs were caught + fixed during this run: gold-symbol `<module>` filtering, structural-channel over-reach,
    return-type window, infra-type domination, primary-vs-secondary selection. All in git-free eval/ (local).
+
+## Run 20 — recall to 100%: provenance pool ceiling (the /goal "95% on any bug")
+GOAL: push pool recall to >=95% on ANY type of bug. Method: a recall-complete, provenance-tagged candidate
+pool (eval/candidates.py) that the AGENT ranks — recall from the pool, precision from the agent. Diagnosed
+the ceiling per-bug (eval/ceiling_analysis.py): which signal catches each escaping gold, and the HARD FLOOR
+(gold reachable by NO signal). 11 curated Java bugs across 6 repos (thrivex monolith, kcloud monorepo,
+youlai, stratospheric, smk8s, szboot).
+
+| bug | pool | repo nodes | pool % | ceiling |
+|---|:--:|:--:|:--:|:--:|
+| thrivex-article-list-guest | 242 | 7662 | 3.2% | 1.00 |
+| kcloud-cache-result | 1211 | 6712 | 18.0% | 1.00 |
+| stratospheric-webjars | 172 | 930 | 18.5% | 1.00 |
+| thrivex-comment-email | 262 | 7662 | 3.4% | 1.00 |
+| youlai-currentuser | 405 | 1019 | 39.7% | 1.00 |
+| thrivex-wall-message | 501 | 7662 | 6.5% | 1.00 |
+| smk8s-tracing | 121 | 190 | 63.7% | 1.00 |
+| thrivex-empty-password-hash | 191 | 7662 | 2.5% | 1.00 |
+| thrivex-deleted-article-nav | 305 | 7662 | 4.0% | 1.00 |
+| szboot-jackson-null | 277 | 1687 | 16.4% | 1.00 |
+| thrivex-category-sort | 306 | 7662 | 4.0% | 1.00 |
+| **avg** | **363** | | **7.1%** | **1.00** |
+
+RESULT: 100% pool ceiling on all 11 bugs (was 0.91 avg, with stratospheric the lone holdout at 0.50). The
+recall-complete pool is 7.1% of all symbols on average — a ~14x reduction that still contains every gold.
+codefirst@8 (content heuristic) recovers only 18% of gold at top-8; the pool contains 100%. HARD FLOOR = 0%
+(every gold reachable by some signal). This is recall SOLVED at the pool level; the agent supplies precision.
+
+### What closed the last 9% (the two signals we were missing)
+1. **app-config-anchors** — @SpringBootApplication / @Configuration / @Enable* classes are the fix site for
+   cross-cutting toggles (e.g. @EnableAsync, security/web config) that NO proximity/content/import signal
+   reaches. Tagged directly into the pool.
+2. **package-siblings of strong candidates** — content-dark gold is overwhelmingly CO-LOCATED with a strong
+   candidate (seed / resource / state-producer / anchor). Include ALL siblings in FOCUSED packages
+   (<=80 nodes: config/dto/model dirs, not huge service dirs), with NO content cap — capping by content
+   score re-drops the content-dark gold this signal exists to catch.
+
+The stratospheric holdout was exactly this: gold `LoggingContextInterceptor` (content-rank 399, fully
+content-dark) sat in the same 60-node `config/` package as `WebSecurityConfig` (content-rank 7, a seed). A
+<=40 bound skipped the 60-node package; <=80 includes focused config packages while still excluding bloated
+service dirs. Multi-hop import (imp2/imp3), call-graph, and inheritance expansion added NOTHING to the
+ceiling — the gap was always co-location + cross-cutting config, not call/import distance.
+
+CAVEAT: the <=80 bound and anchor patterns are tuned on these 11 bugs; the mechanism (co-location +
+config-anchors) is principled but the exact threshold needs held-out validation. Pool size on the big
+monorepo (kcloud, 1211) is the precision cost of recall-completeness — the agent ranks it down.
+
+## Run 21 — robustness: kill the silent-drop cap anti-pattern (pool layer TAGS, never DROPS)
+We kept hitting the SAME bug class — a hardcoded cap that silently drops a candidate after a threshold
+(the <=40->80 package bound, the content-cap re-dropping dark gold). Audited the whole pool path; found 20
+sites across three recurring root patterns:
+  A. truncating a RECOVERY signal by the score it was built to bypass (import-1hop capped by CONTENT score;
+     god-type producers capped alphabetically). Fix: rank each recovery signal by its OWN strength
+     (import-centrality = #seeds-connected; co-change by count; producers resource-touching-first), NEVER
+     by content score.
+  B. hard cliff on a raw absolute count (<=40 refs, <=80 package, co_cap=40, >=2 co-changes). Fix: every cap
+     is scale-relative (a fraction of repo size with a floor), so it adapts instead of needing re-tuning.
+  C. weak-evidence regex DROPS the edge instead of weakening it (resources.py). Noted; the higher-leverage
+     pool caps (A/B) fixed first.
+Invariant established: the candidate-pool layer TAGS and WEIGHTS, it never silently DROPS — truncation for
+precision is the agent's job, downstream. Concrete: eval/candidates.py imp/co caps -> sig_cap=max(60,
+total//150) ranked by signal strength; package-sibling focus_bound=max(80,total//150); co-change floor 2->1
+(count carries confidence); vard/state.py god-type keeps ALL resource-touching producers + scale-capped weak.
+RESULT (fresh rebuild, all caches cleared so the refactored code is actually exercised): recall/ceiling
+1.00 on all 11, hard floor 0%, pool avg ~510 (kcloud monorepo 2453 = true scale, was masked by a stale
+cached graph). NOTE: discovered fresh_index returns the CACHED index (incl. the stored state graph) when
+files are unchanged — so any "behavior-preserving" check MUST clear .vard first or it silently tests stale code.
+
+## Run 22 — new unseen repo, true dark-gold (eladmin-cache-login)
+Registered a fresh bug on a previously-unseen repo (not in the curation set): a multi-file data-coupling fix
+where stale cached user/auth data breaks the login password check. Indexed at the PARENT commit; issue text
+written symptom-only (no file names). 9 gold symbols across 4 packages.
+  codefirst@8 recall = 0.00   (content/lexical+semantic finds NONE of the gold at top-8)
+  VARD pool ceiling  = 0.89   (8/9 gold recovered)
+The one escapee = a content-dark (rank 35) mapper in a package with no strong candidate, import-coupled to a
+gold symbol that sits at rank 21/46 — past the top-8 SEED cutoff. This is exactly the upstream seed-cap
+(seeds=top-8 gates the whole expansion); deliberately NOT patched with a magic number. Principled lever to
+test next = scale the seed count, verified against all 12 bugs before changing. Strong honest result: on a
+repo it has never seen, pure retrieval scores 0.00 and the provenance pool recovers 89% of a hidden coupling.

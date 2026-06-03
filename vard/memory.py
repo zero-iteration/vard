@@ -82,8 +82,9 @@ def whole_picture(idx, repo, target, k=6):
         out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}")
 
     cache = {}
+    _prof = ST.dominant_profile(rg)
     types_here = sorted({t for n in syms for t in ST._CAP.findall(ST._node_text(repo, n, cache))
-                         if t in sg["type_def"] and not ST._INFRA.search(t)})
+                         if t in sg["type_def"] and not _prof.infra_re.search(t)})
     if types_here:
         out.append("\n## State it touches (data types)")
         out.append("  " + ", ".join(types_here[:12]))

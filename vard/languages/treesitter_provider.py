@@ -79,7 +79,9 @@ def _decorators(node):
     for c in node.children:                                   # Java: annotations live under `modifiers`
         if c.type == "modifiers":
             scan += [g for g in c.children if g.type in ("annotation", "marker_annotation")]
-    if node.parent is not None and node.parent.type == "decorated_definition":   # python
+    # python `decorated_definition` and JS/TS `export_statement` wrap the decl with the decorators as
+    # siblings; also catch a bare decorator immediately preceding the decl within the same parent.
+    if node.parent is not None and node.parent.type in ("decorated_definition", "export_statement"):
         scan += [c for c in node.parent.children if c.type == "decorator"]
     seen, out = set(), []
     for c in scan:

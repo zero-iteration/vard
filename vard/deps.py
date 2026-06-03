@@ -7,9 +7,18 @@ depends on — so the agent gets a partial picture. This walks up to the project
 finds co-located source dependencies.
 """
 import os, re, subprocess
+from .languages.profiles import _PROFILES
 
 _MAX_UP = 6
 _GRADLE_SETTINGS = ("settings.gradle", "settings.gradle.kts")
+# Build/module markers across ALL languages, so module discovery works on Python/JS/Go repos too — not
+# just Maven/Gradle. Sourced from each LanguageProfile so adding a language adds its build files for free.
+_BUILD_FILES = tuple({f for p in _PROFILES for f in p.build_files})
+_ROOT_MARKERS = tuple({f for p in _PROFILES for f in p.root_marker_files})
+_MODULE_FILES = ("pom.xml", "build.gradle", "build.gradle.kts",          # Java
+                 "pyproject.toml", "setup.py",                            # Python
+                 "package.json",                                          # JS/TS
+                 "go.mod")                                                # Go
 
 
 def _git_root(path):
@@ -22,10 +31,7 @@ def _git_root(path):
 
 
 def _has_build(d):
-    return (os.path.isfile(os.path.join(d, "pom.xml"))
-            or any(os.path.isfile(os.path.join(d, s)) for s in _GRADLE_SETTINGS)
-            or os.path.isfile(os.path.join(d, "build.gradle"))
-            or os.path.isfile(os.path.join(d, "build.gradle.kts")))
+    return any(os.path.isfile(os.path.join(d, f)) for f in _BUILD_FILES)
 
 
 def find_project_root(path):
@@ -44,8 +50,9 @@ def find_project_root(path):
         if ceiling and not parent.startswith(ceiling):
             break
         # the parent is part of the same build if it ALSO has a build file (chain of reactor poms /
-        # the gradle settings root). A gradle settings file marks the definitive root.
-        if any(os.path.isfile(os.path.join(parent, s)) for s in _GRADLE_SETTINGS):
+        # the gradle settings root). A root-marker file (gradle settings, go.work, pnpm-workspace,
+        # lerna/nx) marks the definitive outermost root.
+        if any(os.path.isfile(os.path.join(parent, s)) for s in _ROOT_MARKERS):
             return parent
         if _has_build(parent):
             root = parent
@@ -56,12 +63,13 @@ def find_project_root(path):
 
 
 def find_modules(root):
-    """Module dirs under the root (each has its own build file). For reporting coverage."""
+    """Module dirs under the root (each has its own build file). For reporting coverage. Recognizes
+    Maven/Gradle, Python (pyproject/setup.py), JS/TS (package.json) and Go (go.mod) modules."""
     mods = []
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in
-                   (".git", "target", "build", "node_modules", ".venv", ".vard", ".idea")]
-        if dirpath != root and ("pom.xml" in files or "build.gradle" in files or "build.gradle.kts" in files):
+                   (".git", "target", "build", "node_modules", ".venv", ".vard", ".idea", "dist")]
+        if dirpath != root and any(f in files for f in _MODULE_FILES):
             mods.append(os.path.relpath(dirpath, root))
             dirs[:] = [d for d in dirs if d != "src"]   # don't descend into a module's src for sub-listing
     return sorted(mods)

@@ -15,28 +15,24 @@ instant. Two query paths:
     dark state that heuristics/embeddings cannot — see eval/FINDINGS.md).
 """
 import os, re
+from .languages.profiles import dominant_profile
 
 _CAP = re.compile(r'\b([A-Z][A-Za-z0-9_]+)\b')
-# repo types that are infra/scaffolding, never the "state" itself
-_INFRA = re.compile(r'(Constants?|OperateType|TraceLog|Mapper|Service|ServiceI|Controller|Repository|'
-                    r'Config|Utils?|Factory|Exception|Test|Application|Aspect|Filter|Builder|'
-                    r'Cmd|CmdExe|Qry|Gateway|GatewayImpl|Properties|Enum)$')
-_CACHE_ANN = re.compile(r'\b(DataCache|Cacheable|CachePut|CacheEvict)\b')
-_QUEUE_ANN = re.compile(r'\b(KafkaListener|RabbitListener|RocketMQMessageListener|EventListener|TransactionalEventListener)\b')
+# query-text keywords (match the user's ISSUE text, language-neutral) — these stay here, not in a profile
 _CACHE_Q = re.compile(r'\b(cache|cached|caching|redis|seriali|deserial|jackson|round-?trip|wrapper)\b', re.I)
 _QUEUE_Q = re.compile(r'\b(kafka|queue|topic|consum|publish|listener|message|event|broker|rabbit|rocket)\b', re.I)
-_STATIC_FIELD = re.compile(r'\bstatic\s+(?!final\b)([A-Za-z_][\w.<>\[\]]*)\s+([A-Za-z_]\w*)\s*[=;]')
-_LOGGER = re.compile(r'(?:Logger|Logger<.*>|^Log|Slf4j)$')
 _MAX_REFS = 40
 _GOD_PRODUCER_CAP = 25
-# producer signals: constructs / builds / returns a type
-_NEW = re.compile(r'\bnew\s+([A-Z]\w+)\s*[(<]')
-_BUILDER = re.compile(r'\b([A-Z]\w+)\.builder\s*\(')
-# data-likeness for candidate ranking (state the agent should pick) vs service/infra
-_DATA_LIKE = re.compile(r'(DTO|VO|DO|CO|BO|Entity|Model|Request|Response|Event|Form|Bean|Payload|'
-                        r'Record|Result|Data|Info|Message|Settings|Config|State|Snapshot)$')
-_NONDATA = re.compile(r'(Impl|Transformer|Client|Handler|Manager|Listener|Provider|Resolver|Validator|'
-                      r'Interceptor|Aspect|Filter|Job|Task|Runner|Scheduler|Executor|Helper)$')
+# All language-/framework-specific patterns (infra/data naming, construction, annotations, field decls,
+# return-type & mutation parsing) live in vard/languages/profiles.py, resolved per-repo by dominant_profile.
+# COMPAT SHIMS (Java-default): a few eval-harness modules (eval/edges2, memory_db, identify, valueflow) read
+# these module-level regexes directly. The eval corpus is all-Java, so the Java profile's patterns are the
+# correct default for them. Production code paths (build_state_graph / candidates / auto_implicated / memory)
+# resolve the per-repo profile instead and do NOT use these.
+from .languages.profiles import JavaProfile as _JavaProfile
+_INFRA = _JavaProfile.infra_re
+_DATA_LIKE = _JavaProfile.data_like_re
+_NONDATA = _JavaProfile.nondata_re
 
 
 def _content_nodes(rg):
@@ -56,31 +52,15 @@ def _node_text(repo, n, cache):
     return "\n".join(_src(repo, n.file, cache)[n.start - 1:n.end])
 
 
-def _return_type_types(repo, n, cache, typenames):
-    decl = " ".join(_src(repo, n.file, cache)[n.start - 1:n.start + 8])
-    m = re.search(r'([A-Za-z_][\w.<>,\[\]\s]*?)\s+' + re.escape(n.name) + r'\s*\(', decl)
-    return {t for t in _CAP.findall(m.group(1)) if t in typenames} if m else set()
-
-
-def _mutated_types(txt, typenames):
-    """Types whose instance is MUTATED here: a var that receives `.setX(...)` and is declared with a
-    repo type (incl. `List<T> v`, `for (T v : ...)`, a method param `T v`). Catches the real write
-    sites (e.g. setSupplierInFare(Fare fare){ fare.setSupplier(...) }) that construct/return miss."""
-    setters = set(re.findall(r'\b(\w+)\s*\.\s*set[A-Z]\w*\s*\(', txt))
-    out = set()
-    for var in setters:
-        m = re.search(r'\b([A-Z]\w+)\s*(?:<[^>]*>)?\s+' + re.escape(var) + r'\b', txt)
-        if m and m.group(1) in typenames:
-            out.add(m.group(1))
-        m2 = re.search(r'\bList\s*<\s*([A-Z]\w+)\s*>\s+' + re.escape(var) + r'\b', txt)
-        if m2 and m2.group(1) in typenames:
-            out.add(m2.group(1))
-    return out
+def _decl_text(repo, n, cache):
+    return " ".join(_src(repo, n.file, cache)[n.start - 1:n.start + 8])
 
 
 def build_state_graph(rg, repo):
     """Compute the state graph from the symbol graph + on-disk source. Stored in the index.
-    Returns a picklable dict: type_def, type_refs, up/down (interface<->impl), resources, holders."""
+    Returns a picklable dict: type_def, type_refs, up/down (interface<->impl), resources, holders.
+    Language-/framework-specific signals come from the repo's dominant LanguageProfile."""
+    prof = dominant_profile(rg)
     content = _content_nodes(rg)
     type_def = {}
     for n in rg.nodes.values():
@@ -98,28 +78,29 @@ def build_state_graph(rg, repo):
     deco = getattr(rg, "node_decorators", {})
     for n in content:
         txt = _node_text(repo, n, cache)
+        decl = _decl_text(repo, n, cache)
         refs = {t for t in _CAP.findall(txt) if t in typenames and t != n.name}
         for t in refs:
             type_refs.setdefault(t, set()).add(n.id)
-        # producers of a type: nodes that construct / build / return it (the "writers" of that state)
-        prod = ({t for t in _NEW.findall(txt) if t in typenames}
-                | {t for t in _BUILDER.findall(txt) if t in typenames}
-                | _return_type_types(repo, n, cache, typenames)
-                | _mutated_types(txt, typenames))
+        # producers of a type: nodes that construct / build / return / mutate it (the "writers" of state)
+        prod = ({t for t in prof.new_re.findall(txt) if t in typenames}
+                | {t for t in prof.builder_re.findall(txt) if t in typenames}
+                | prof.return_type_types(decl, n.name, typenames)
+                | prof.mutated_types(txt, typenames))
         for t in prod:
             if t != n.name:
                 producers.setdefault(t, set()).add(n.id)
         anns = " ".join(deco.get(n.id, []))
-        if _CACHE_ANN.search(anns):
-            st = {t for t in _return_type_types(repo, n, cache, typenames) if not _INFRA.search(t)}
+        if prof.cache_ann_re.search(anns):
+            st = {t for t in prof.return_type_types(decl, n.name, typenames) if not prof.infra_re.search(t)}
             resources.append((n.id, "cache", sorted(st)))
-        elif _QUEUE_ANN.search(anns):
-            resources.append((n.id, "queue", sorted({t for t in refs if not _INFRA.search(t)})))
+        elif prof.queue_ann_re.search(anns):
+            resources.append((n.id, "queue", sorted({t for t in refs if not prof.infra_re.search(t)})))
         if n.type == "class":
-            real = [(ty, nm) for ty, nm in _STATIC_FIELD.findall(txt)
-                    if not _LOGGER.search(ty) and not nm.isupper()]
+            real = [(nm, ty) for nm, ty in prof.static_fields(txt)
+                    if not prof.logger_re.search(ty) and not nm.isupper()]
             if real:
-                holders[n.id] = sorted({ty for ty, _ in real if ty in typenames and not _INFRA.search(ty)} | {n.name})
+                holders[n.id] = sorted({ty for _, ty in real if ty in typenames and not prof.infra_re.search(ty)} | {n.name})
     # store sets as sorted lists for clean pickling
     return {"type_def": type_def,
             "type_refs": {t: sorted(ids) for t, ids in type_refs.items()},
@@ -142,12 +123,15 @@ def _type_closure(sg, name, rg):
         out |= set(refs)                                   # ordinary type: all referencers
     else:
         # god-type (referenced everywhere): don't drop everything — keep the PRODUCERS (writers of
-        # this state), which is what a 'wrong state' bug needs. Rank producers that also touch a
-        # resource (cache/queue) first — those are the ones that store/derive the state — and cap.
+        # this state), which is what a 'wrong state' bug needs. Resource-touching producers (those that
+        # store/derive the state into a cache/queue) are the real state-writers: keep ALL of them, never
+        # capped. Only the low-signal remaining producers are bounded (and the cap scales with fan-in).
         prods = sg.get("producers", {}).get(name, [])
         res_ids = {nid for nid, _, _ in sg.get("resources", [])}
-        prods = sorted(prods, key=lambda nid: (nid not in res_ids, nid))[:_GOD_PRODUCER_CAP]
-        out |= set(prods)
+        strong = [p for p in prods if p in res_ids]
+        weak = sorted(p for p in prods if p not in res_ids)
+        cap = max(_GOD_PRODUCER_CAP, len(refs) // 4)       # scale with the type's fan-in, floor 25
+        out |= set(strong) | set(weak[:cap])
     return out
 
 
@@ -164,24 +148,20 @@ def candidates(sg, rg, seed_files=None, task="", max_n=400):
     """The state types the agent chooses from. For big repos, narrowed to types whose def lives in or
     near (1 import hop) the files the search surfaced — structural, so textually-disconnected state is
     kept. seed_files: files of the content-top hits."""
-    names = {t for t in sg["type_def"] if not _INFRA.search(t)}
+    prof = dominant_profile(rg)
+    names = {t for t in sg["type_def"] if not prof.infra_re.search(t)}
     if len(names) > max_n and seed_files:
         near = {t for t in names for did in sg["type_def"].get(t, []) if rg.nodes[did].file in seed_files}
         names = near or names
-
-    _DATA_DIR = ("/model/", "/models/", "/dto/", "/entity/", "/entities/", "/vo/", "/bo/", "/co/",
-                 "/domain/", "/pojo/", "/payload/", "/event/", "/events/", "/record/")
-    _SVC_DIR = ("/service/", "/controller/", "/handler/", "/config/", "/util", "/transformer/",
-                "/client/", "/aspect/", "/filter/", "/provider/")
 
     def _paths(t):
         return [rg.nodes[d].file.lower() for d in sg["type_def"].get(t, [])]
 
     def is_data(t):
-        return bool(_DATA_LIKE.search(t)) or any(s in p for p in _paths(t) for s in _DATA_DIR)
+        return bool(prof.data_like_re.search(t)) or any(s in p for p in _paths(t) for s in prof.data_dirs)
 
     def is_svc(t):
-        return bool(_NONDATA.search(t)) or any(s in p for p in _paths(t) for s in _SVC_DIR)
+        return bool(prof.nondata_re.search(t)) or any(s in p for p in _paths(t) for s in prof.svc_dirs)
 
     # rank: actual STATE (data POJOs/DTOs/entities, by name OR package) first; service/infra last
     def rank(t):
@@ -194,12 +174,13 @@ def auto_implicated(sg, rg, task, seed_ids):
     resources the task points at. Deliberately omits the broad seed-reference path (it adds noise on
     ordinary bugs); the agent path covers state the task doesn't name."""
     from . import common as C
+    prof = dominant_profile(rg)
     idents, _ = C.extract_seeds(task)
     qtok = set(C.subtokens(task))
     seedset, seed_files = set(seed_ids), {rg.nodes[i].file for i in seed_ids}
     out = set()
     for t in idents:
-        if t in sg["type_def"] and not _INFRA.search(t):
+        if t in sg["type_def"] and not prof.infra_re.search(t):
             out.add(t)
     kinds = set()
     if _CACHE_Q.search(task or ""):
@@ -220,7 +201,7 @@ def auto_implicated(sg, rg, task, seed_ids):
         # reference (capped, data-only — stays precise, doesn't flood on logic bugs).
         scored = {}
         for t, refs in sg["type_refs"].items():
-            if _DATA_LIKE.search(t) and not _INFRA.search(t):
+            if prof.data_like_re.search(t) and not prof.infra_re.search(t):
                 hits = len(set(refs) & seedset)
                 if hits:
                     scored[t] = hits
