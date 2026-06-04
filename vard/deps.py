@@ -98,7 +98,7 @@ def _artifact_id(d):
 def discover_source_deps(root, search_dirs=None):
     """Source of DECLARED dependencies that lives locally outside the reactor. Matches a candidate
     module by its OWN <artifactId> (robust to dir-name != artifactId), and descends ONE level into
-    sibling reactor projects (e.g. ../flights-common-data/flights-models). Bounded to 1 level."""
+    sibling reactor projects (e.g. ../shared-common-data/shared-models). Bounded to 1 level."""
     artifacts = set()
     for dp, _, fs in os.walk(root):
         if "pom.xml" in fs and dp.count(os.sep) - root.count(os.sep) <= 3:

@@ -632,3 +632,36 @@ localization over grep. VARD's VALIDATED value is unchanged and orthogonal: a re
 tagged CONTEXT layer (the pool) that beats weak retrieval (BM25/dense) at matched budget on coupling bugs
 (Run 20-23) — i.e. it helps WEAK retrieval reach dark gold, not a STRONG agent localize. n=2; a scaled run
 (eval/agent_eval.py is built for it) needs subagent budget, but the n=1->n=3 trend is consistent.
+
+## Run 25 — function-level field coupling (instance-field def-use): built, clean, recovers 0 on real bugs
+Extended coupling from resources (cache/db/queue) to FUNCTION level via shared-field def-use: funB writes
+Type.field, funA reads Type.field -> couple, no call link. Receiver types from var_types (this->enclosing
+class). eval/funccoupling.py. Three modes: filtered (type + JDK/base/IDF filters), full (type, no filters),
+name (no type, unreduced).
+
+PRECISION: name-only explodes (kcloud 4,980 edges, .id=1,092). Type resolution -> 233-456 edges (7-21x cut).
+Filters (drop JDK/primitive/base types + IDF-cap hubs) -> 175 clean edges on kcloud, real fields
+(AuthA.captchaV, AmazonS3Storage.amazonS3). So it CAN be made precise without Soot.
+
+CATCH: works on its target pattern — synthetic funA/funB, static AND instance (Order.discount written by
+PromoService.apply, read by FareService.fare -> coupled, no call link). Confirmed.
+
+RECOVERY ON REAL BUGS: 0.00. Across 16 curated + 16 ContextBench bugs, in ALL THREE modes, field-coupling
+recovers ZERO gold (|fp| mostly 0, 0 bugs where it uniquely adds gold). Not the filters (full/name also 0),
+not eval size. NONE of 32 real benchmark bugs is the distant-instance-field-mutation pattern — they are
+cache/resource coupling, serialization, logic, API. The signal targets a bug class that is ABSENT from both
+our curated set and ContextBench (SWE-bench-derived).
+
+UPDATE — maximal "all variables" graph (every identifier, writes<->reads linked, no type/scope): on kcloud
+= 291,891 edges (dominated by id/value/key/name/list — ~99% noise), recovers field-recall 0.09 at ~270
+candidates/bug. But the recovery is NAME-COINCIDENCE, not state coupling: "recovered" gold links via generic
+locals (`list`, `id`, `ids`, `dept`) shared with seeds — e.g. two parallel getXSuperior controllers that
+share variable names because they do the same KIND of thing, not because one mutates the other's state.
+Type+scope-resolved coupling (the only thing measuring real shared state) scores 0.00 here.
+
+CONCLUSION: tested from every angle — typed-precise (0.00), full-no-filters (0.00), name-only (0.00),
+all-variables-maximal (0.09 but pure name-collision noise) — across 16 curated + 16 ContextBench bugs. The
+distant-state-mutation pattern is ABSENT from every benchmark available here; the only graph that "recovers"
+anything recovers noise. The signal is built, clean, works on synthetic — but unvalidatable on any
+accessible data; it would only surface on private real-world repos not represented in these sets. Building
+further here is blind; the gate is real in-the-wild cases of the pattern, not more code.
