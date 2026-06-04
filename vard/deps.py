@@ -6,7 +6,7 @@ Running `vard init` inside one module of a Spring project would otherwise miss t
 depends on — so the agent gets a partial picture. This walks up to the project root and (best-effort)
 finds co-located source dependencies.
 """
-import os, re, subprocess
+import os, re, subprocess, json
 from .languages.profiles import _PROFILES
 
 _MAX_UP = 6
@@ -75,38 +75,82 @@ def find_modules(root):
     return sorted(mods)
 
 
-_DEP = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
-_PKG_ART = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
+_MVN_ART = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
 
 
-def _artifact_id(d):
-    """The module's OWN artifactId (first <artifactId> after the optional <parent> block in its pom).
-    Matching on this — not the directory name — is robust when dir-name != artifactId (common)."""
-    p = os.path.join(d, "pom.xml")
-    if not os.path.isfile(p):
-        return None
+def _read(p):
     try:
-        txt = open(p, errors="ignore").read()
+        return open(p, errors="ignore").read()
     except Exception:
-        return None
-    # skip the <parent> artifactId if present
-    txt = re.sub(r"<parent>.*?</parent>", "", txt, flags=re.S)
-    m = _PKG_ART.search(txt)
-    return m.group(1) if m else None
+        return ""
+
+
+def _module_id(d):
+    """A module's OWN identity, tagged by ecosystem, for matching against another module's declared deps:
+    Maven artifactId / npm package name / Go module path / Python project name. Dir-name-independent."""
+    pom = os.path.join(d, "pom.xml")
+    if os.path.isfile(pom):
+        m = _MVN_ART.search(re.sub(r"<parent>.*?</parent>", "", _read(pom), flags=re.S))   # skip <parent>
+        if m:
+            return ("mvn", m.group(1))
+    pkg = os.path.join(d, "package.json")
+    if os.path.isfile(pkg):
+        try:
+            j = json.loads(_read(pkg))
+            if j.get("name"):
+                return ("js", j["name"])
+        except Exception:
+            pass
+    gomod = os.path.join(d, "go.mod")
+    if os.path.isfile(gomod):
+        m = re.search(r"^\s*module\s+(\S+)", _read(gomod), re.M)
+        if m:
+            return ("go", m.group(1))
+    for pyf, rx in ((os.path.join(d, "pyproject.toml"), r'(?m)^\s*name\s*=\s*["\']([^"\']+)'),
+                    (os.path.join(d, "setup.py"), r'name\s*=\s*["\']([^"\']+)')):
+        if os.path.isfile(pyf):
+            m = re.search(rx, _read(pyf))
+            if m:
+                return ("py", m.group(1).lower())
+    return None
+
+
+def _declared_deps(d):
+    """Dependency identifiers a module DECLARES (ecosystem-tagged), to match against sibling module ids."""
+    out = set()
+    pom = os.path.join(d, "pom.xml")
+    if os.path.isfile(pom):
+        out |= {("mvn", a) for a in _MVN_ART.findall(_read(pom))}
+    pkg = os.path.join(d, "package.json")
+    if os.path.isfile(pkg):
+        try:
+            j = json.loads(_read(pkg))
+            for sec in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                out |= {("js", name) for name in (j.get(sec) or {})}
+        except Exception:
+            pass
+    gomod = os.path.join(d, "go.mod")
+    if os.path.isfile(gomod):
+        out |= {("go", m) for m in re.findall(r"^\s*(?:require\s+)?([\w./\-]+)\s+v\d", _read(gomod), re.M)}
+    for pyf in (os.path.join(d, "pyproject.toml"), os.path.join(d, "setup.py")):
+        if os.path.isfile(pyf):
+            for blk in re.findall(r'(?:dependencies|install_requires)\s*=\s*\[(.*?)\]', _read(pyf), re.S):
+                out |= {("py", dep.lower()) for dep in re.findall(r'["\']([A-Za-z0-9_.\-]+)', blk)}
+    return out
 
 
 def discover_source_deps(root, search_dirs=None):
-    """Source of DECLARED dependencies that lives locally outside the reactor. Matches a candidate
-    module by its OWN <artifactId> (robust to dir-name != artifactId), and descends ONE level into
-    sibling reactor projects (e.g. ../shared-common-data/shared-models). Bounded to 1 level."""
-    artifacts = set()
-    for dp, _, fs in os.walk(root):
-        if "pom.xml" in fs and dp.count(os.sep) - root.count(os.sep) <= 3:
-            try:
-                artifacts |= set(_DEP.findall(open(os.path.join(dp, "pom.xml"), errors="ignore").read()))
-            except Exception:
-                pass
-    if not artifacts:
+    """Local source of a project's DECLARED dependencies (cross-ecosystem: Maven/Gradle artifactId, npm
+    package name, Go module path, Python project name). Collects what the project tree declares, then matches
+    a sibling by its OWN module identity — robust to dir-name != module-name — descending one level into
+    sibling reactors/workspaces. Nothing here is repo-specific; everything is resolved from the given root."""
+    declared = set()
+    for dp, dirs, _ in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in
+                   (".git", "target", "build", "node_modules", ".venv", ".vard", ".idea", "dist")]
+        if dp.count(os.sep) - root.count(os.sep) <= 3:
+            declared |= _declared_deps(dp)
+    if not declared:
         return []
     rootabs = os.path.abspath(root)
     found = []
@@ -114,8 +158,8 @@ def discover_source_deps(root, search_dirs=None):
     def consider(d):
         if os.path.abspath(d) == rootabs or not os.path.isdir(d):
             return
-        aid = _artifact_id(d)
-        if aid and aid in artifacts and _has_build(d):
+        mid = _module_id(d)
+        if mid and mid in declared and _has_build(d):
             found.append(os.path.abspath(d))
 
     for base in (search_dirs or [os.path.dirname(rootabs)]):
@@ -128,7 +172,7 @@ def discover_source_deps(root, search_dirs=None):
             if not os.path.isdir(d):
                 continue
             consider(d)                                   # the sibling itself
-            if _has_build(d):                             # sibling is a reactor -> descend 1 level
+            if _has_build(d):                             # sibling is a reactor/workspace -> descend 1 level
                 try:
                     for sub in os.listdir(d):
                         consider(os.path.join(d, sub))
