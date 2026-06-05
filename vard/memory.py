@@ -7,7 +7,7 @@ the hidden couplings, the history), which flat memory (CLAUDE.md / grep / vector
 This is the read/mined layer; a write path (append curated decisions / Jira / postmortems) is the
 natural extension — same schema, richer sources.
 """
-import os, re, json, subprocess, collections
+import os, re, json, subprocess, collections, hashlib, time
 from . import state as ST
 
 _TICKET = re.compile(r'(?:#(\d+)|\b([A-Z][A-Z0-9]+-\d+)\b)')
@@ -121,3 +121,131 @@ def whole_picture(idx, repo, target, k=6):
         for f, n in co.most_common(k):
             out.append(f"- {f}  (x{n})")
     return "\n".join(out)
+
+
+# ============================================================================
+# Conversational memory — code-anchored, freshness-verified (the write path).
+# A memory is a fact bound to a code anchor (file::symbol). The JSON store is the
+# truth; embeddings are only a fallback recall index over the fact text. Invalidation
+# rides on the code: at recall we re-hash the cited symbol — changed => flag stale,
+# gone => drop. Never inject a silently-stale fact (that is the confident-wrong machine).
+# ============================================================================
+
+def _mem_path(repo):
+    return os.path.join(os.path.abspath(repo), ".vard", "memory.json")
+
+
+def load_memories(repo):
+    try:
+        return json.load(open(_mem_path(repo)))
+    except Exception:
+        return []
+
+
+def _save_memories(repo, entries):
+    os.makedirs(os.path.join(os.path.abspath(repo), ".vard"), exist_ok=True)
+    json.dump(entries, open(_mem_path(repo), "w"), indent=2)
+
+
+def _span_hash(rg, repo, nid):
+    """Hash of the cited symbol's CURRENT source text. None if it no longer exists."""
+    n = rg.nodes.get(nid)
+    if n is None:
+        return None
+    try:
+        lines = open(os.path.join(os.path.abspath(repo), n.file), encoding="utf-8", errors="ignore").read().splitlines()
+        return hashlib.sha1("\n".join(lines[n.start - 1:n.end]).encode("utf-8", "ignore")).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def _resolve_anchor(idx, citation):
+    """Citation string ('file:line' / 'Class.method' / 'file::qual') -> stable node id, or None."""
+    from . import query as Q
+    ids = Q.resolve_target(idx, citation)
+    return ids[0] if ids else None
+
+
+def remember(idx, repo, fact, citations, reason="", source="conversation"):
+    """Persist a fact, ANCHORED to code. Anchor-or-drop: a fact with no resolvable citation is refused
+    (unanchorable claims can't be invalidated, so they're banned)."""
+    rg = idx["rg"]
+    cites = [citations] if isinstance(citations, str) else list(citations or [])
+    resolved = []
+    for c in cites:
+        nid = _resolve_anchor(idx, c)
+        if nid:
+            n = rg.nodes[nid]
+            resolved.append({"anchor": nid, "file": n.file, "name": n.qual.split("::")[-1],
+                             "hash": _span_hash(rg, repo, nid)})
+    if not resolved:
+        return {"stored": False, "reason": "no citation resolved to code — fact refused (anchor-or-drop)"}
+    entries = load_memories(repo)
+    # write-side adjudication: a new fact on the same anchor SUPERSEDES the old one
+    anchors = {r["anchor"] for r in resolved}
+    entries = [e for e in entries if not (anchors & {c["anchor"] for c in e.get("citations", [])})]
+    entries.append({"fact": fact.strip(), "reason": (reason or "").strip(),
+                    "citations": resolved, "source": source, "ts": int(time.time())})
+    _save_memories(repo, entries)
+    return {"stored": True, "anchors": sorted(anchors), "n_memories": len(entries)}
+
+
+def _entry_status(rg, repo, entry):
+    """active = every cited symbol unchanged; stale = some changed; gone = all deleted."""
+    states = []
+    for c in entry.get("citations", []):
+        cur = _span_hash(rg, repo, c["anchor"])
+        states.append("gone" if cur is None else ("active" if cur == c.get("hash") else "stale"))
+    if states and all(s == "gone" for s in states):
+        return "gone"
+    return "stale" if "stale" in states or "gone" in states else "active"
+
+
+def recall(idx, repo, anchors=None, files=None, query="", limit=6):
+    """Fresh, relevant memories. Primary match = anchor/file overlap with the current context; embedding
+    similarity over the fact text is the fallback. Drops 'gone' memories; flags 'stale' ones for re-check."""
+    rg = idx["rg"]
+    entries = load_memories(repo)
+    if not entries:
+        return []
+    anchors = set(anchors or []); files = set(files or [])
+    scored = []
+    for e in entries:
+        st = _entry_status(rg, repo, e)
+        if st == "gone":
+            continue
+        ea = {c["anchor"] for c in e["citations"]}; ef = {c["file"] for c in e["citations"]}
+        hit = bool((anchors & ea) or (files & ef))
+        scored.append((hit, st, e))
+    direct = [(st, e) for hit, st, e in scored if hit]
+    if direct:
+        out = direct
+    elif query:                                   # fallback: embedding similarity over fact text
+        try:
+            from . import embed as E
+            import numpy as np
+            facts = [e["fact"] for _, _, e in scored]
+            fv = E.embed_texts(facts); qv = E.embed_task(query)
+            sims = (np.array(fv) @ np.array(qv))
+            order = sims.argsort()[::-1][:limit]
+            out = [(scored[i][1], scored[i][2]) for i in order if sims[i] > 0.35]
+        except Exception:
+            out = []
+    else:
+        out = []
+    return [{"fact": e["fact"], "reason": e["reason"], "status": st,
+             "anchors": [c["name"] for c in e["citations"]], "ts": e["ts"]} for st, e in out[:limit]]
+
+
+def recall_text(idx, repo, anchors=None, files=None, query="", limit=6):
+    """Render recalled memories for injection — with the freshness flag, never as bare assertion."""
+    mems = recall(idx, repo, anchors=anchors, files=files, query=query, limit=limit)
+    if not mems:
+        return ""
+    lines = ["## Remembered about this code (verify flagged items before relying on them)"]
+    for m in mems:
+        flag = "✓" if m["status"] == "active" else "⚠ cited code CHANGED since — re-check"
+        anch = ", ".join(m["anchors"][:3])
+        why = f" — {m['reason']}" if m["reason"] else ""
+        lines.append(f"  {flag}  {m['fact']}{why}  [{anch}]")
+    return "\n".join(lines)

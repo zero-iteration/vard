@@ -23,6 +23,8 @@ MCP tools load. (`vard rules --write` re-applies just the routing block if you e
 | the WHOLE picture before editing / when you need full context | `vard_whole_picture("<Class or file>")` — code + state it touches + coupled code + the decisions/tickets/incidents behind it (why, from history) + what co-changes with it (context you can't reconstruct from the code) |
 | trace a data resource | `vard_resource("<table / cache-key / queue>")` — who writes vs reads it |
 | see hidden couplings | `vard_couplings` |
+| the user states a durable fact NOT in the code (a decision, constraint, gotcha, correction — "this cache is the source of truth, not the DB") | `vard_remember("<fact>", "<symbol or file:line it's about>")` — anchored to that code, auto-invalidated when it changes |
+| before answering how/why code behaves | `vard_recall("<task>")` — facts the user already told you, each freshness-checked (✓ valid · ⚠ cited code changed, re-check) |
 
 There is **no** `search`, `stats`, `lint`, or `readers` command — the table above is the entire surface.
 Do not read VARD's own source to reverse-engineer the interface; this file is it.

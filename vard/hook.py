@@ -39,10 +39,54 @@ def _edit_line(file_path, ti):
     return None
 
 
+def _userprompt(payload):
+    """UserPromptSubmit: deterministically (1) inject fresh memories relevant to the prompt, and
+    (2) capture an explicit user assertion as a code-anchored memory. Load-only; fail-silent."""
+    import re
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        return
+    repo = _find_repo(payload.get("cwd") or ".")
+    if not repo:
+        return
+    from vard import cli, query as Q, memory as MEM
+    idx = cli.load_index(repo)                       # never rebuild inside a hook
+    if not idx:
+        return
+    names = list({t for t in re.findall(r'\b[A-Z][A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)?\b', prompt)})[:10]
+    anchors = set()
+    for t in names:
+        for i in Q.resolve_target(idx, t)[:3]:
+            anchors.add(i)
+    # (2) capture: explicit assertion + a resolvable anchor -> remember (high precision, key-free)
+    if re.search(r'\b(remember|note that|keep in mind|for the record|always|never|actually|the reason|'
+                 r'gotcha|don.?t forget|FYI)\b', prompt, re.I) and anchors:
+        try:
+            MEM.remember(idx, repo, prompt[:300], list(anchors), source="hook")
+        except Exception:
+            pass
+    # (1) recall: inject fresh, relevant memories as context
+    try:
+        rg = idx["rg"]
+        files = {rg.nodes[a].file for a in anchors if a in rg.nodes}
+        mtxt = MEM.recall_text(idx, repo, anchors=anchors, files=files, query=prompt)
+    except Exception:
+        mtxt = ""
+    if mtxt:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": mtxt}}))
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
+        return
+    if payload.get("hook_event_name") == "UserPromptSubmit" or ("prompt" in payload and "tool_input" not in payload):
+        try:
+            _userprompt(payload)
+        except Exception:
+            return
         return
     try:
         ti = payload.get("tool_input", {}) or {}

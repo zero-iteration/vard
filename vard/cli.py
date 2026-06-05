@@ -41,10 +41,18 @@ Use it proactively, without being asked:
   `vard_whole_picture("<Class or file>")` — it joins the code, the state it touches, the code coupled
   through shared data, the decisions/tickets/incidents behind it (why it's this way, from history), and
   what co-changes with it. This is context you cannot reconstruct by reading the code.
+- **When the user tells you something durable that ISN'T in the code** — a decision, constraint, gotcha,
+  or correction ("this cache is the source of truth, not the DB"; "never call X directly, it skips
+  validation"; "we did it this way because of the 2023 incident") — call `vard_remember("<fact>",
+  "<symbol or file:line it's about>")` so future sessions aren't re-told. It auto-expires when that code
+  changes, so it can't go stale.
+- **Before answering how/why code behaves**, call `vard_recall("<task>")` to surface what the user already
+  told you about it (each fact is freshness-checked: ✓ valid, ⚠ cited code changed — re-check).
 - Skip VARD for trivial edits to a file you already have open.
 
 If the MCP tools aren't loaded, the CLI is equivalent: `vard context "..."`, `vard impact <name>`,
-`vard resource <name>`, `vard couplings`. The index self-refreshes; run `vard init` once if `.vard/` is absent.
+`vard resource <name>`, `vard couplings`, `vard remember "<fact>" "<anchor>"`, `vard recall "<task>"`.
+The index self-refreshes; run `vard init` once if `.vard/` is absent.
 <!-- /vard:routing -->
 """
 
@@ -324,7 +332,45 @@ def context_text(task, repo, k=8, hypothetical=None):
                 out += rows
     except Exception:
         pass
+    # conversational memory: freshness-verified facts anchored to the code we surfaced (the "why"
+    # someone told us, not in the code). Stale-flagged, never asserted silently.
+    try:
+        from . import memory as MEM
+        mtxt = MEM.recall_text(idx, repo, anchors=set(top),
+                               files={rg.nodes[nid].file for nid in top}, query=task)
+        if mtxt:
+            out.append("\n" + mtxt)
+    except Exception:
+        pass
     return "\n".join(out)
+
+
+def remember_text(fact, citations, repo, reason=""):
+    """Write path: persist a code-anchored fact. citations = comma-separated symbols/files."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import memory as MEM
+    cites = [c.strip() for c in citations.split(",") if c.strip()] if isinstance(citations, str) else citations
+    r = MEM.remember(idx, os.path.abspath(repo), fact, cites, reason=reason)
+    if r.get("stored"):
+        return f"✓ remembered, anchored to {', '.join(r['anchors'])}  ({r['n_memories']} memories stored)."
+    return f"✗ not stored: {r['reason']}  (give a citation that resolves — a symbol name or file:line)"
+
+
+def recall_text(task, repo):
+    """Read path: fresh, relevant memories for a task. Resolves named symbols as anchors + embedding fallback."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import memory as MEM, query as Q
+    import re as _re
+    rg = idx["rg"]; anchors = set()
+    for t in list(set(_re.findall(r'\b[A-Z][A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)?\b', task)))[:10]:
+        for i in Q.resolve_target(idx, t)[:3]:
+            anchors.add(i)
+    files = {rg.nodes[a].file for a in anchors if a in rg.nodes}
+    return MEM.recall_text(idx, os.path.abspath(repo), anchors=anchors, files=files, query=task) or "(no relevant memories)"
 
 
 def state_candidates_text(task, repo):
@@ -445,14 +491,30 @@ def install_hook(scope, repo):
         try: data = _j.load(open(path))
         except Exception: data = {}
     cmd = _hook_command()
-    hooks = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
-    for entry in hooks:                                  # idempotent: skip if already present
-        for h in entry.get("hooks", []):
-            if "vard" in (h.get("command") or "") and "hook" in (h.get("command") or ""):
-                return f"VARD hook already installed in {path}"
-    hooks.append({"matcher": "Edit|Write", "hooks": [{"type": "command", "command": cmd}]})
+    hooksroot = data.setdefault("hooks", {})
+
+    def _present(event):
+        for entry in hooksroot.get(event, []):
+            for h in entry.get("hooks", []):
+                c = h.get("command") or ""
+                if "vard" in c and "hook" in c:
+                    return True
+        return False
+
+    added = []
+    if not _present("PreToolUse"):                       # blast-radius warning on edits
+        hooksroot.setdefault("PreToolUse", []).append(
+            {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": cmd}]})
+        added.append("PreToolUse (impact)")
+    if not _present("UserPromptSubmit"):                 # memory recall-inject + capture
+        hooksroot.setdefault("UserPromptSubmit", []).append(
+            {"hooks": [{"type": "command", "command": cmd}]})
+        added.append("UserPromptSubmit (memory)")
+    if not added:
+        return f"VARD hooks already installed in {path}"
     _j.dump(data, open(path, "w"), indent=2)
-    return f"✓ installed VARD pre-edit impact hook → {path}\n  command: {cmd}\n  (fires on Edit/Write; silent unless the repo is `vard init`'d)"
+    return (f"✓ installed VARD hooks → {path}\n  command: {cmd}\n  events: {', '.join(added)}\n"
+            f"  (silent unless the repo is `vard init`'d)")
 
 
 def uninstall_hook(scope, repo):
@@ -462,12 +524,13 @@ def uninstall_hook(scope, repo):
     if not os.path.isfile(path):
         return f"no settings at {path}"
     data = _j.load(open(path))
-    pre = data.get("hooks", {}).get("PreToolUse", [])
-    kept = [e for e in pre if not any("vard" in (h.get("command") or "") and "hook" in (h.get("command") or "")
-                                       for h in e.get("hooks", []))]
-    data.get("hooks", {})["PreToolUse"] = kept
+    isvard = lambda h: "vard" in (h.get("command") or "") and "hook" in (h.get("command") or "")
+    for ev in ("PreToolUse", "UserPromptSubmit"):
+        entries = data.get("hooks", {}).get(ev)
+        if entries is not None:
+            data["hooks"][ev] = [e for e in entries if not any(isvard(h) for h in e.get("hooks", []))]
     _j.dump(data, open(path, "w"), indent=2)
-    return f"✓ removed VARD hook from {path}"
+    return f"✓ removed VARD hooks from {path}"
 
 
 def main():
@@ -485,6 +548,10 @@ def main():
     pw = sub.add_parser("whole-picture"); pw.add_argument("target"); pw.add_argument("repo", nargs="?", default=".")
     psc = sub.add_parser("state-candidates"); psc.add_argument("task"); psc.add_argument("repo", nargs="?", default=".")
     psl = sub.add_parser("state-lineage"); psl.add_argument("types"); psl.add_argument("repo", nargs="?", default=".")
+    prm = sub.add_parser("remember"); prm.add_argument("fact"); prm.add_argument("citations",
+        help="comma-separated code anchors (symbol or file:line) the fact is about")
+    prm.add_argument("repo", nargs="?", default="."); prm.add_argument("--reason", default="")
+    prc = sub.add_parser("recall"); prc.add_argument("task"); prc.add_argument("repo", nargs="?", default=".")
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
     pu = sub.add_parser("uninstall-hook"); pu.add_argument("repo", nargs="?", default="."); pu.add_argument("--global", dest="glob", action="store_true")
     pl = sub.add_parser("learn"); pl.add_argument("repo", nargs="?", default="."); pl.add_argument("--sample", type=int, default=150)
@@ -543,6 +610,10 @@ def _dispatch(a):
         print(state_candidates_text(a.task, a.repo))
     elif a.cmd == "state-lineage":
         print(state_lineage_text(a.types, a.repo))
+    elif a.cmd == "remember":
+        print(remember_text(a.fact, a.citations, a.repo, reason=a.reason))
+    elif a.cmd == "recall":
+        print(recall_text(a.task, a.repo))
     elif a.cmd == "install-hook":
         print(install_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "uninstall-hook":

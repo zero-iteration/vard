@@ -99,6 +99,30 @@ def vard_state_lineage(types: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_remember(fact: str, citations: str, repo: str, reason: str = "") -> str:
+    """Persist a durable fact about this repo that is NOT in the code — a decision, constraint, gotcha,
+    or correction the user told you (e.g. "this cache is the source of truth, not the DB"; "never call X
+    directly, it skips validation"). `citations` = comma-separated code anchors the fact is about (a
+    symbol like "RedisCacheManager.createConfig" or a "file.py:line"). The fact is ANCHORED to that code
+    and auto-invalidated when that code changes, so it can't silently go stale. A fact with no resolvable
+    citation is refused (unanchorable claims can't be verified). Call this when the user states something
+    durable about how/why the code works that future sessions should not have to be re-told."""
+    return cli.remember_text(fact, citations, repo, reason=reason)
+
+
+@mcp.tool()
+@_safe
+def vard_recall(task: str, repo: str) -> str:
+    """Recall durable facts previously remembered about the code relevant to `task` — decisions,
+    constraints, gotchas the user stated that aren't visible in the code. Each is freshness-checked
+    against the current code: ✓ = still valid, ⚠ = the cited code changed since (re-check before relying
+    on it). Call this before answering questions about how/why code behaves, to avoid contradicting what
+    the user already told you."""
+    return cli.recall_text(task, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_whole_picture(target: str, repo: str) -> str:
     """THE WHOLE PICTURE before you touch a file/symbol — call this before editing or when you need
     full context, not just the code. Given a class or file (e.g. "UserServiceImpl"), returns one

@@ -12,6 +12,7 @@ and the edit. Local and key-optional by default.
 - [Install](#install)
 - [Quick start](#quick-start)  — index, then query
 - [What VARD gives the agent](#what-vard-gives-the-agent)
+- [Memory (code-anchored, self-invalidating)](#memory-code-anchored-self-invalidating)
 - [Multi-module projects & dependencies](#multi-module-projects--dependencies)
 - [How it works](#how-it-works)
 - [Results](#results)
@@ -79,12 +80,27 @@ agent-facing guide.
 | `vard_impact(target)` | readers/writers coupled through caches/DBs/queues that an edit would affect. |
 | `vard_resource(name)` | who writes vs reads a given cache key / table / queue. |
 | `vard_couplings()` | all implicit writer⇄reader data couplings in the repo. |
+| `vard_remember(fact, citations)` | persist a durable fact that **isn't in the code** — a decision, constraint, gotcha, or correction the user stated ("this cache is the source of truth, not the DB"). Anchored to the cited code and auto-invalidated when that code changes. |
+| `vard_recall(task)` | the remembered facts about code relevant to a task, each **freshness-checked** against the current code (✓ valid · ⚠ cited code changed, re-check). |
 
-Optional pre-edit hook — warns the agent when it edits code coupled through shared state:
+Optional hooks — install once, then VARD works without the agent having to ask:
 
 ```bash
 vard install-hook            # current repo   (--global for all your repos)
 ```
+
+- **pre-edit (impact):** warns when the agent edits code coupled through shared state.
+- **on-prompt (memory):** deterministically recalls relevant remembered facts into context, and captures explicit user assertions — so memory doesn't depend on the agent choosing to call a tool.
+
+### Memory (code-anchored, self-invalidating)
+
+The durable knowledge an agent can't reconstruct from code — *why* it's this way, the decision, the gotcha — lives in `.vard/memory.json` as facts **anchored to a code symbol**. The rule is **anchor-or-drop**: a fact with no resolvable citation is refused, because an unanchorable claim can't be verified. Invalidation rides on the code itself — on recall, VARD re-checks the cited symbol:
+
+- unchanged → **✓ active**
+- changed → **⚠ stale** (surfaced for re-check, never asserted silently)
+- deleted → **dropped**
+
+That last part is the point: a memory that can't go stale without saying so, rather than a generator of confident, authoritative-sounding lies. Storage is plain JSON (human-editable); embeddings are only a fallback recall index.
 
 ## Multi-module projects & dependencies
 
