@@ -75,6 +75,7 @@ agent-facing guide.
 | tool | use it for |
 |---|---|
 | `vard_context(task)` | relevant code for a task, **including** the functions coupled through shared data. Call before grepping. |
+| `vard_candidates(task)` | the **recall-complete** candidate pool — every candidate tagged with WHY (content / resource-coupled / state-producer / import-1hop / co-changed×N / config-anchor / package-sibling). Use over `context` for hard "what else touches this?" / wrong-stale-data cases: a tagged superset, you pick. Recall from the pool, precision from you. |
 | `vard_whole_picture(target)` | the full picture before editing: the code, the **state** it touches, the code **coupled** through shared data (what you'd break), the **decisions/tickets/incidents** behind it, and what **co-changes** with it. |
 | `vard_state_candidates(task)` → `vard_state_lineage(types)` | state-first localization: when data is wrong/stale/incomplete and the code that sets it isn't obvious, see the program's state types, identify the wrong one(s), then get the code that defines and **produces/consumes** that state — including producers in other modules with no textual link to the symptom. |
 | `vard_impact(target)` | readers/writers coupled through caches/DBs/queues that an edit would affect. |

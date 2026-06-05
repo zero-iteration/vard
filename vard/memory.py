@@ -147,9 +147,19 @@ def _save_memories(repo, entries):
     json.dump(entries, open(_mem_path(repo), "w"), indent=2)
 
 
-def _span_hash(rg, repo, nid):
-    """Hash of the cited symbol's CURRENT source text. None if it no longer exists."""
-    n = rg.nodes.get(nid)
+def _anchor_hash(idx, repo, anchor):
+    """Freshness hash of an anchor's CURRENT state. Handles two anchor kinds:
+       code symbol -> hash of its source span; `config::<key>` -> hash of the key's def sites+values.
+    None if the anchor no longer exists (symbol deleted / config key removed)."""
+    rg = idx["rg"]
+    if anchor.startswith("config::"):                     # config key anchor
+        key = anchor.split("::", 1)[1]
+        cfg = (idx.get("config") or {}).get(key)
+        if not cfg or not cfg.get("defs"):
+            return None
+        joined = "|".join(f"{d['file']}:{d['line']}={d['value']}" for d in cfg["defs"])
+        return hashlib.sha1(joined.encode("utf-8", "ignore")).hexdigest()[:16]
+    n = rg.nodes.get(anchor)                              # code symbol anchor
     if n is None:
         return None
     try:
@@ -160,26 +170,39 @@ def _span_hash(rg, repo, nid):
 
 
 def _resolve_anchor(idx, citation):
-    """Citation string ('file:line' / 'Class.method' / 'file::qual') -> stable node id, or None."""
+    """Citation -> stable anchor id. Tries a code symbol first (file:line / Class.method / file::qual),
+    then a CONFIG KEY (so a fact can be anchored to e.g. 'spring.cache.type'). Returns id or None."""
     from . import query as Q
     ids = Q.resolve_target(idx, citation)
-    return ids[0] if ids else None
+    if ids:
+        return ids[0]
+    from . import config_index as CFG
+    nk = CFG._norm(citation)
+    if nk in (idx.get("config") or {}):
+        return f"config::{nk}"
+    return None
 
 
 def remember(idx, repo, fact, citations, reason="", source="conversation"):
-    """Persist a fact, ANCHORED to code. Anchor-or-drop: a fact with no resolvable citation is refused
-    (unanchorable claims can't be invalidated, so they're banned)."""
+    """Persist a fact, ANCHORED to code OR config. Anchor-or-drop: a fact with no resolvable citation is
+    refused (unanchorable claims can't be invalidated, so they're banned)."""
     rg = idx["rg"]
     cites = [citations] if isinstance(citations, str) else list(citations or [])
     resolved = []
     for c in cites:
-        nid = _resolve_anchor(idx, c)
-        if nid:
-            n = rg.nodes[nid]
-            resolved.append({"anchor": nid, "file": n.file, "name": n.qual.split("::")[-1],
-                             "hash": _span_hash(rg, repo, nid)})
+        anchor = _resolve_anchor(idx, c)
+        if not anchor:
+            continue
+        if anchor.startswith("config::"):
+            key = anchor.split("::", 1)[1]
+            defs = (idx.get("config") or {}).get(key, {}).get("defs", [])
+            file, name = (defs[0]["file"] if defs else "(config)"), key
+        else:
+            n = rg.nodes[anchor]; file, name = n.file, n.qual.split("::")[-1]
+        resolved.append({"anchor": anchor, "file": file, "name": name,
+                         "hash": _anchor_hash(idx, repo, anchor)})
     if not resolved:
-        return {"stored": False, "reason": "no citation resolved to code — fact refused (anchor-or-drop)"}
+        return {"stored": False, "reason": "no citation resolved to code or config — fact refused (anchor-or-drop)"}
     entries = load_memories(repo)
     # write-side adjudication: a new fact on the same anchor SUPERSEDES the old one
     anchors = {r["anchor"] for r in resolved}
@@ -190,11 +213,11 @@ def remember(idx, repo, fact, citations, reason="", source="conversation"):
     return {"stored": True, "anchors": sorted(anchors), "n_memories": len(entries)}
 
 
-def _entry_status(rg, repo, entry):
-    """active = every cited symbol unchanged; stale = some changed; gone = all deleted."""
+def _entry_status(idx, repo, entry):
+    """active = every cited anchor unchanged; stale = some changed; gone = all deleted."""
     states = []
     for c in entry.get("citations", []):
-        cur = _span_hash(rg, repo, c["anchor"])
+        cur = _anchor_hash(idx, repo, c["anchor"])
         states.append("gone" if cur is None else ("active" if cur == c.get("hash") else "stale"))
     if states and all(s == "gone" for s in states):
         return "gone"
@@ -211,7 +234,7 @@ def recall(idx, repo, anchors=None, files=None, query="", limit=6):
     anchors = set(anchors or []); files = set(files or [])
     scored = []
     for e in entries:
-        st = _entry_status(rg, repo, e)
+        st = _entry_status(idx, repo, e)
         if st == "gone":
             continue
         ea = {c["anchor"] for c in e["citations"]}; ef = {c["file"] for c in e["citations"]}

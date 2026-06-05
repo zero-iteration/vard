@@ -99,6 +99,18 @@ def vard_state_lineage(types: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_candidates(task: str, repo: str) -> str:
+    """The RECALL-COMPLETE candidate pool for a task — every candidate tagged with WHY it's here
+    (content / resource-coupled / state-producer / import-1hop / co-changed×N / config-anchor /
+    package-sibling). Use this instead of vard_context when you need high recall and don't want to miss
+    code coupled through shared data/state with no textual or call link (the dark-coupling case): it
+    surfaces a superset, tagged, and YOU pick the relevant ones — recall from the pool, precision from you.
+    Larger output than vard_context; reach for it on hard "what else touches this?" / wrong-stale-data bugs."""
+    return cli.candidates_text(task, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_config(query: str, repo: str) -> str:
     """Find the config/properties that change behaviour at RUNTIME — the settings that aren't in the code.
     Given a key, a key fragment, or a symbol name, returns where each config key is DEFINED

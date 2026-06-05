@@ -339,6 +339,25 @@ def context_text(task, repo, k=8, hypothetical=None):
                 out += rows
     except Exception:
         pass
+    # co-located candidates: focused-package siblings of the top hits (content-dark gold is overwhelmingly
+    # co-located with a strong hit — a known recall hole). Capped + labeled as candidates; the recall-complete
+    # version is the `vard_candidates` pool.
+    try:
+        import collections as _c
+        nodes_all = [n for n in rg.nodes.values() if n.type in ("function", "method", "class")]
+        dc = _c.Counter(os.path.dirname(n.file) for n in nodes_all)
+        fb = max(80, len(nodes_all) // 150)
+        sib_dirs = {os.path.dirname(rg.nodes[t].file) for t in top}
+        shown = set(top) | set(coupled)
+        sibs = [n.id for n in nodes_all if os.path.dirname(n.file) in sib_dirs
+                and dc[os.path.dirname(n.file)] <= fb and n.id not in shown]
+        sibs = sorted(sibs, key=lambda c: score.get(c, 0.0), reverse=True)[:k]
+        if sibs:
+            out.append("\n## Co-located candidates (same focused package as a top hit — candidates)")
+            for cid in sibs:
+                n = rg.nodes[cid]; out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}")
+    except Exception:
+        pass
     # config it depends on: declarative settings the surfaced code reads (@Value/${}/env) — runtime
     # behaviour that's invisible in the code itself.
     try:
@@ -361,6 +380,16 @@ def context_text(task, repo, k=8, hypothetical=None):
     except Exception:
         pass
     return "\n".join(out)
+
+
+def candidates_text(task, repo):
+    """The recall-complete, provenance-tagged candidate pool the agent selects from (recall from the pool,
+    precision from the agent). Higher recall than `context` for dark-coupling cases; larger, tagged output."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import candidates as CAND
+    return CAND.pool_text(idx, task, os.path.abspath(repo))
 
 
 def config_text(query, repo):
@@ -571,6 +600,7 @@ def main():
     pi.add_argument("--deps", action="store_true", help="auto-discover + index co-located source dependencies")
     pc = sub.add_parser("couplings"); pc.add_argument("repo", nargs="?", default="."); pc.add_argument("--limit", type=int, default=40)
     px = sub.add_parser("context"); px.add_argument("task"); px.add_argument("repo", nargs="?", default="."); px.add_argument("-k", type=int, default=8); px.add_argument("--hypothetical", default=None)
+    pca = sub.add_parser("candidates"); pca.add_argument("task"); pca.add_argument("repo", nargs="?", default=".")
     pm = sub.add_parser("impact"); pm.add_argument("target"); pm.add_argument("repo", nargs="?", default=".")
     pr = sub.add_parser("resource"); pr.add_argument("name"); pr.add_argument("repo", nargs="?", default=".")
     pw = sub.add_parser("whole-picture"); pw.add_argument("target"); pw.add_argument("repo", nargs="?", default=".")
@@ -629,6 +659,8 @@ def _dispatch(a):
         print(couplings_text(a.repo, a.limit))
     elif a.cmd == "context":
         print(context_text(a.task, a.repo, a.k, a.hypothetical))
+    elif a.cmd == "candidates":
+        print(candidates_text(a.task, a.repo))
     elif a.cmd == "impact":
         print(impact_text(a.target, a.repo))
     elif a.cmd == "resource":
