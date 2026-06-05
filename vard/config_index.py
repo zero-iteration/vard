@@ -112,12 +112,37 @@ def scan_config_reads(rg, repo):
     return reads
 
 
+_CP_PREFIX = re.compile(r'ConfigurationProperties\(\s*(?:(?:prefix|value)\s*=\s*)?["\']([^"\']+)["\']')
+
+
+def _prefix_bound_reads(rg, defs):
+    """Spring @ConfigurationProperties(prefix="x") binds the WHOLE `x.*` config subtree to a class with no
+    @Value per key. Couple every defined key under the prefix to that class — the dominant Spring mechanism
+    that per-key read detection misses entirely."""
+    extra = {}
+    for nid, decs in getattr(rg, "node_decorators", {}).items():
+        for d in decs:
+            if "ConfigurationProperties" not in d:
+                continue
+            m = _CP_PREFIX.search(d)
+            if not m:
+                continue
+            pfx = _norm(m.group(1))
+            for k in defs:
+                if k == pfx or k.startswith(pfx + "."):
+                    extra.setdefault(k, set()).add(nid)
+    return extra
+
+
 def build_config_index(rg, repo):
-    """Store only the CODE-RELEVANT keys — those actually read in code (coupled, or read-but-undefined).
-    The 1000s of defined-but-unread keys (k8s manifests, test fixtures, framework defaults) are noise for
-    a code↔config coupling layer; arbitrary 'where is key X defined' lookups re-scan config files on demand."""
+    """Store only the CODE-RELEVANT keys — those actually read in code (per-key via @Value/${}/getenv, OR
+    bound by @ConfigurationProperties prefix), coupled or read-but-undefined. The 1000s of defined-but-unread
+    keys (k8s manifests, test fixtures, framework defaults) are noise for a code↔config coupling layer;
+    arbitrary 'where is key X defined' lookups re-scan config files on demand."""
     defs = scan_config_defs(repo)
     reads = scan_config_reads(rg, repo)
+    for k, ids in _prefix_bound_reads(rg, defs).items():     # add @ConfigurationProperties subtree bindings
+        reads.setdefault(k, set()).update(ids)
     out = {}
     for k in reads:
         out[k] = {"defs": defs.get(k, []), "readers": sorted(reads[k])}
