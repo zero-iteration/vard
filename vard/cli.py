@@ -181,10 +181,17 @@ def build_index(repo, fresh=False, llm=None, extra_roots=None):
         print(f"⚠ vard: state-graph build failed ({str(e)[:50]}) — indexing without state lineage", file=sys.stderr, flush=True)
         state_graph = None
     try:
+        from . import config_index as CFG
+        print("→ vard: indexing config/properties (runtime settings + their code readers)...", file=sys.stderr, flush=True)
+        config = CFG.build_config_index(rg, repo)
+    except Exception as e:
+        print(f"⚠ vard: config indexing failed ({str(e)[:50]}) — indexing without the config layer", file=sys.stderr, flush=True)
+        config = {}
+    try:
         with open(_index_path(repo), "wb") as f:
             pickle.dump({"rg": rg, "ruleset": rs, "fingerprint": Fr.fingerprint(repo), "history": hist,
                          "import_edges": import_edges, "res": res, "state": state_graph,
-                         "extra_roots": extra_roots}, f)
+                         "config": config, "extra_roots": extra_roots}, f)
     except Exception as e:
         raise RuntimeError(f"could not write index to {_index_path(repo)}: {e}") from e
     gs = rg.stats()
@@ -332,6 +339,17 @@ def context_text(task, repo, k=8, hypothetical=None):
                 out += rows
     except Exception:
         pass
+    # config it depends on: declarative settings the surfaced code reads (@Value/${}/env) — runtime
+    # behaviour that's invisible in the code itself.
+    try:
+        from . import config_index as CFG
+        crows = CFG.for_nodes(idx.get("config") or {}, rg, set(top))
+        if crows:
+            out.append("\n## Config it depends on (runtime settings, not in the code)")
+            for r in crows:
+                out.append(f"- {r}")
+    except Exception:
+        pass
     # conversational memory: freshness-verified facts anchored to the code we surfaced (the "why"
     # someone told us, not in the code). Stale-flagged, never asserted silently.
     try:
@@ -343,6 +361,16 @@ def context_text(task, repo, k=8, hypothetical=None):
     except Exception:
         pass
     return "\n".join(out)
+
+
+def config_text(query, repo):
+    """Config/properties keys relevant to a query: where each is defined (file:line=value) + the code
+    that reads it. Surfaces the runtime settings that change behaviour but aren't in the code."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import config_index as CFG
+    return CFG.render(idx.get("config") or {}, idx["rg"], query)
 
 
 def remember_text(fact, citations, repo, reason=""):
@@ -552,6 +580,7 @@ def main():
         help="comma-separated code anchors (symbol or file:line) the fact is about")
     prm.add_argument("repo", nargs="?", default="."); prm.add_argument("--reason", default="")
     prc = sub.add_parser("recall"); prc.add_argument("task"); prc.add_argument("repo", nargs="?", default=".")
+    pcf = sub.add_parser("config"); pcf.add_argument("query"); pcf.add_argument("repo", nargs="?", default=".")
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
     pu = sub.add_parser("uninstall-hook"); pu.add_argument("repo", nargs="?", default="."); pu.add_argument("--global", dest="glob", action="store_true")
     pl = sub.add_parser("learn"); pl.add_argument("repo", nargs="?", default="."); pl.add_argument("--sample", type=int, default=150)
@@ -614,6 +643,8 @@ def _dispatch(a):
         print(remember_text(a.fact, a.citations, a.repo, reason=a.reason))
     elif a.cmd == "recall":
         print(recall_text(a.task, a.repo))
+    elif a.cmd == "config":
+        print(config_text(a.query, a.repo))
     elif a.cmd == "install-hook":
         print(install_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "uninstall-hook":

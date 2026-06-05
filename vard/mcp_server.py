@@ -99,6 +99,19 @@ def vard_state_lineage(types: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_config(query: str, repo: str) -> str:
+    """Find the config/properties that change behaviour at RUNTIME — the settings that aren't in the code.
+    Given a key, a key fragment, or a symbol name, returns where each config key is DEFINED
+    (file:line = value, across all profiles like application.yml / application-prod.yml) and the CODE that
+    READS it (`@Value("${...}")`, `getProperty`, `os.getenv`, `process.env`...). Use this when behaviour
+    depends on configuration (a feature flag, cache TTL, datasource, profile override) rather than code —
+    it surfaces a value→code coupling that has no call/import link. Does NOT claim which value wins at
+    runtime (that depends on the active profile/env); it shows all definitions with their source."""
+    return cli.config_text(query, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_remember(fact: str, citations: str, repo: str, reason: str = "") -> str:
     """Persist a durable fact about this repo that is NOT in the code — a decision, constraint, gotcha,
     or correction the user told you (e.g. "this cache is the source of truth, not the DB"; "never call X

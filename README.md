@@ -80,6 +80,7 @@ agent-facing guide.
 | `vard_impact(target)` | readers/writers coupled through caches/DBs/queues that an edit would affect. |
 | `vard_resource(name)` | who writes vs reads a given cache key / table / queue. |
 | `vard_couplings()` | all implicit writer⇄reader data couplings in the repo. |
+| `vard_config(query)` | the config/properties that change behaviour at **runtime** but aren't in the code — where a key is defined (across profiles, with values) and the code that reads it (`@Value`/`${}`/`getenv`/`process.env`). A value→code coupling with no call/import link. |
 | `vard_remember(fact, citations)` | persist a durable fact that **isn't in the code** — a decision, constraint, gotcha, or correction the user stated ("this cache is the source of truth, not the DB"). Anchored to the cited code and auto-invalidated when that code changes. |
 | `vard_recall(task)` | the remembered facts about code relevant to a task, each **freshness-checked** against the current code (✓ valid · ⚠ cited code changed, re-check). |
 
