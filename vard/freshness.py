@@ -7,6 +7,10 @@ import os, subprocess
 SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", "build", "dist", ".vard", ".tox"}
 # must cover every language build_graph indexes, else non-Python repos never detect changes → stale index
 CODE_EXTS = (".py", ".pyi", ".java", ".js", ".jsx", ".ts", ".tsx", ".go", ".mjs", ".cjs")
+# config files feed the config index (config_index.py); a change must trigger a re-index too, or the
+# config layer goes silently stale (editing application.yml wouldn't be noticed).
+CONFIG_EXTS = (".properties", ".yml", ".yaml", ".env")
+_TRACKED = CODE_EXTS + CONFIG_EXTS
 
 
 def fingerprint(repo):
@@ -14,7 +18,7 @@ def fingerprint(repo):
     for root, dirs, files in os.walk(repo):
         dirs[:] = [d for d in dirs if d not in SKIP]
         for f in files:
-            if f.endswith(CODE_EXTS):
+            if f.endswith(_TRACKED):
                 p = os.path.join(root, f)
                 try:
                     st = os.stat(p); fp[os.path.relpath(p, repo)] = (int(st.st_mtime), st.st_size)
