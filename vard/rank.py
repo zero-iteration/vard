@@ -8,7 +8,8 @@ import os
 import re
 
 # relative to the content composite (≙ 1.0)
-DEFAULT_WEIGHTS = {"history": 0.6, "ppr": 0.45, "hyde_bm": 0.32, "hyde_sem": 0.10}
+DEFAULT_WEIGHTS = {"history": 0.6, "ppr": 0.45, "hyde_bm": 0.32, "hyde_sem": 0.10,
+                   "runtime": 0.5, "runtime_edge": 0.6}
 _IDENT = re.compile(r"[A-Za-z_]\w{2,}")
 _BODY_CAP = 600                                         # body identifier tokens per node (whole method)
 
@@ -145,6 +146,29 @@ def rank_nodes(idx, task, repo, nodes, hypothetical=None, weights=None):
         prn = P.ppr_scores(edges, list(file_cs.keys()), file_cs)
         for n in nodes:
             score[n.id] += w["ppr"] * prn.get(n.file, 0.0)
+    # RUNTIME overlay — the top-confidence tier. Ground truth a static reader can't reconstruct: which code
+    # actually ran, and the REAL caller↔callee edges (resolves dynamic dispatch / interface→impl). It's
+    # recall-incomplete (only exercised paths), so we AMPLIFY relevance rather than add flat mass:
+    #   (a) confirmation — a content-relevant node we KNOW executes is lifted in proportion to its relevance,
+    #       plus a small floor so genuinely-live code isn't fully content-gated;
+    #   (b) propagation — content relevance flows one hop along the GROUND-TRUTH call graph (both directions).
+    #       This is method-level PPR with true edges: far higher precision than the file-import graph above.
+    rt_conf = idx.get("rt_confirmed") or set()
+    rt_edges = idx.get("rt_edges") or []
+    if rt_conf:
+        for nid in rt_conf:
+            if nid in score:
+                score[nid] += w["runtime"] * (0.2 + content_node.get(nid, 0.0))
+    if rt_edges:
+        spread = {}
+        for ca, ce, _n in rt_edges:                          # propagate each endpoint's content to the other
+            spread[ce] = spread.get(ce, 0.0) + content_node.get(ca, 0.0)
+            spread[ca] = spread.get(ca, 0.0) + content_node.get(ce, 0.0)
+        hi = max(spread.values()) if spread else 0.0
+        if hi > 0:
+            for nid, v in spread.items():
+                if nid in score:
+                    score[nid] += w["runtime_edge"] * (v / hi)
     # down-weight files that are rarely the fix site (tests/fixtures/generated/migrations)
     for n in nodes:
         pr = _relevance_prior(n.file)

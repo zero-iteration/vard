@@ -58,6 +58,16 @@ def impact(idx, target, limit=40):
         seen.add(nid); n = rg.nodes[nid]
         items.append({"qual": n.qual, "loc": _loc(n), "relation": relation, "via": rid, "reason": reason})
 
+    # RUNTIME-OBSERVED call edges FIRST — ground truth (from `vard test`): we SAW these calls fire, so they
+    # resolve dynamic dispatch / interface→impl that the name-based heuristic only guesses. Added before the
+    # weaker relations so a node we actually observed calling/called keeps that high-confidence label.
+    idset = set(ids)
+    for ca, ce, n in (idx.get("rt_edges") or []):
+        if ce in idset and ca not in idset:
+            add(ca, "runtime-caller", f"observed calling this at runtime ({n}x) — a real caller (ground truth, not name-based)", None)
+        if ca in idset and ce not in idset:
+            add(ce, "runtime-callee", f"this was observed calling it at runtime ({n}x) — a real callee (ground truth)", None)
+
     target_writes, target_reads = set(), set()
     for tid in ids:
         target_writes |= wbyf.get(tid, set())
@@ -99,7 +109,8 @@ def impact(idx, target, limit=40):
     for cid in list(callers)[:20]:
         add(cid, "caller?", f"calls a method named '{'/'.join(names)}' ({callers[cid]}x) — likely a caller (name-based)", None)
 
-    order = {"downstream": 0, "upstream": 1, "co-writer": 2, "sibling": 3, "caller?": 4}
+    order = {"runtime-caller": 0, "runtime-callee": 0, "downstream": 1, "upstream": 2,
+             "co-writer": 3, "sibling": 4, "caller?": 5}
     items.sort(key=lambda x: order.get(x["relation"], 9))
     return {"target": [rg.nodes[i].qual for i in ids],
             "writes": sorted(target_writes), "reads": sorted(target_reads),

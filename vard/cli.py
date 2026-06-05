@@ -218,12 +218,17 @@ def fresh_index(repo):
     cur = Fr.fingerprint(repo)
     if idx is None:
         print("→ vard: building index (first run)...", file=sys.stderr)
-        build_index(repo); return load_index(repo)
-    if not Fr.is_fresh(idx.get("fingerprint", {}), cur):
+        build_index(repo); idx = load_index(repo)
+    elif not Fr.is_fresh(idx.get("fingerprint", {}), cur):
         changed, deleted = Fr.diff(idx.get("fingerprint", {}), cur)
         print(f"→ vard: repo changed ({len(changed)} modified, {len(deleted)} removed) — re-indexing...", file=sys.stderr)
-        build_index(repo, extra_roots=idx.get("extra_roots")); return load_index(repo)
-    return idx   # unchanged → instant
+        build_index(repo, extra_roots=idx.get("extra_roots")); idx = load_index(repo)
+    # runtime overlay (ground-truth executed code/edges) lives in .vard/runtime.json — it accretes between
+    # re-indexes and is freshness-checked per node, so it's attached on load, not baked into the pickle.
+    if idx is not None:
+        from . import runtime as RT
+        RT.attach(idx, repo)
+    return idx
 
 
 def _is_test(path):
@@ -294,6 +299,25 @@ def context_text(task, repo, k=8, hypothetical=None):
             n = rg.nodes[pid]
             why = Q.coupling_reason(idx, anchor, pid, rid)
             out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}   ⮂ {why}")
+    # runtime-confirmed: ground truth from `vard test` — code we SAW execute + the REAL call edges among
+    # the top hits' neighbors. Agent-uncatchable (it can't run the code); shown as confirmed, not inferred.
+    rt_conf = idx.get("rt_confirmed") or set()
+    rt_edges = idx.get("rt_edges") or []
+    if rt_conf:
+        confirmed_top = [nid for nid in top if nid in rt_conf]
+        rt_neigh = {}                                        # neighbor -> (direction, anchor) via real call edges
+        for ca, ce, _n in rt_edges:
+            if ca in topset and ce not in topset:
+                rt_neigh.setdefault(ce, ("calls →", ca))
+            if ce in topset and ca not in topset:
+                rt_neigh.setdefault(ca, ("← called by", ce))
+        if confirmed_top or rt_neigh:
+            out.append("\n## Confirmed at runtime (observed executing during tests — ground truth)")
+            for nid in confirmed_top:
+                n = rg.nodes[nid]; out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}   ✓ ran")
+            for pid, (dirn, anchor) in list(rt_neigh.items())[:k]:
+                n = rg.nodes[pid]; a = rg.nodes[anchor]
+                out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}   ⮂ {dirn} {a.qual} (real call edge)")
     if hfiles:
         shown = {rg.nodes[nid].file for nid in top}
         histonly = [f for f in hfiles if f not in shown][:k]
@@ -590,6 +614,90 @@ def uninstall_hook(scope, repo):
     return f"✓ removed VARD hooks from {path}"
 
 
+def _agent_jar(override=None):
+    """Locate the bundled JVM agent jar. Editable installs ship it at <repo>/vard-agent/vard-agent.jar."""
+    if override:
+        return os.path.abspath(override) if os.path.isfile(override) else None
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../vard (project root)
+    for cand in (os.path.join(here, "vard-agent", "vard-agent.jar"),
+                 os.path.join(os.path.dirname(here), "vard-agent", "vard-agent.jar")):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _derive_java_pkgs(idx, repo):
+    """Top-2-segment package prefixes from the repo's Java sources (e.g. com.example) — the sampler keeps
+    only these classes, so the trace is app code, not the test framework / maven internals."""
+    rg = idx["rg"]; root = os.path.abspath(repo); prefixes = set()
+    for f in {n.file for n in rg.nodes.values() if n.file.endswith(".java")}:
+        try:
+            txt = open(os.path.join(root, f), encoding="utf-8", errors="ignore").read(2000)
+        except Exception:
+            continue
+        m = re.search(r"^[ \t]*package[ \t]+([\w.]+)[ \t]*;", txt, re.M)
+        if m:
+            segs = m.group(1).split(".")
+            prefixes.add(".".join(segs[:2]) if len(segs) >= 2 else segs[0])
+    return sorted(prefixes)
+
+
+def run_test(repo, command, jar=None, pkgs=None, ms="2"):
+    """`vard test -- <cmd>`: run the dev's existing test command (default `mvn test`) under the VARD java
+    agent, then merge the ground-truth trace (what actually executed + real call edges) into the runtime
+    overlay. The dev runs the tests; VARD only listens — no app to stand up, it just needs to compile."""
+    import subprocess, glob
+    repo = _project_root(repo)
+    jarp = _agent_jar(jar)
+    if not jarp:
+        return ("vard test: agent jar not found. Build it:\n"
+                "  cd vard-agent && javac -d build src/VardAgent.java && "
+                "jar cfm vard-agent.jar manifest.txt -C build VardAgent.class\n"
+                "  (or pass --jar <path>)")
+    print("→ vard: ensuring the index is fresh before the run...", file=sys.stderr)
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    if pkgs is None:
+        pkgs = ",".join(_derive_java_pkgs(idx, repo))
+    cmd = command or ["mvn", "test"]
+    tracedir = os.path.join(os.path.abspath(repo), VDIR, "trace")
+    if os.path.isdir(tracedir):
+        for old in glob.glob(os.path.join(tracedir, "*")):
+            try: os.remove(old)
+            except OSError: pass
+    os.makedirs(tracedir, exist_ok=True)
+    outbase = os.path.join(tracedir, "run.jsonl")
+    # JAVA_TOOL_OPTIONS reaches EVERY JVM the build spawns — including the JVM Surefire forks for the actual
+    # tests (which -javaagent via MAVEN_OPTS would miss). The agent writes one per-PID file per JVM.
+    jto = f"-javaagent:{jarp} -Dvard.out={outbase} -Dvard.ms={ms}" + (f" -Dvard.pkgs={pkgs}" if pkgs else "")
+    env = dict(os.environ)
+    env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") + " " + jto).strip()
+    print(f"→ vard: running `{' '.join(cmd)}` under the agent (pkgs: {pkgs or 'all app classes'})...", file=sys.stderr)
+    try:
+        rc = subprocess.run(cmd, cwd=os.path.abspath(repo), env=env).returncode
+    except FileNotFoundError:
+        return f"vard test: command not found: {cmd[0]}"
+    from . import runtime as RT
+    traces = sorted(glob.glob(os.path.join(tracedir, "run.jsonl.*")))
+    if not traces:
+        return (f"vard test: tests ran (exit {rc}) but no trace was captured. The forked test JVM may not "
+                "have honored JAVA_TOOL_OPTIONS, or no app classes (pkgs filter) executed.")
+    tot = {"methods": 0, "edges": 0, "unresolved": 0}
+    for tp in traces:
+        r = RT.ingest(idx, repo, tp)
+        if r.get("ok"):
+            tot = {"methods": r["methods"], "edges": r["edges"],          # ingest returns cumulative totals
+                   "unresolved": tot["unresolved"] + r.get("unresolved", 0)}
+    for tp in traces:
+        try: os.remove(tp)
+        except OSError: pass
+    return (f"✓ vard test: tests exit {rc}; merged {len(traces)} JVM trace(s) → runtime overlay\n"
+            f"  {tot['methods']} methods confirmed live, {tot['edges']} real call edges"
+            + (f"  ({tot['unresolved']} trace quals unmatched to nodes)" if tot["unresolved"] else "")
+            + f"\n  → context/impact now mark these as runtime-confirmed (ground truth).")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="vard")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -614,6 +722,11 @@ def main():
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
     pu = sub.add_parser("uninstall-hook"); pu.add_argument("repo", nargs="?", default="."); pu.add_argument("--global", dest="glob", action="store_true")
     pl = sub.add_parser("learn"); pl.add_argument("repo", nargs="?", default="."); pl.add_argument("--sample", type=int, default=150)
+    ptt = sub.add_parser("test", help="run the test suite under the JVM agent → merge ground-truth runtime trace")
+    ptt.add_argument("--repo", default="."); ptt.add_argument("--jar", default=None, help="path to vard-agent.jar")
+    ptt.add_argument("--pkgs", default=None, help="comma class-prefixes to trace (default: auto from repo)")
+    ptt.add_argument("--ms", default="2", help="stack-sampling interval (ms)")
+    ptt.add_argument("command", nargs=argparse.REMAINDER, help="test command after -- (default: mvn test)")
     pru = sub.add_parser("rules", help="print (or --write) agent routing rules for CLAUDE.md / AGENTS.md")
     pru.add_argument("repo", nargs="?", default="."); pru.add_argument("--write", action="store_true")
     pru.add_argument("--file", default=None, help="target file (default: existing CLAUDE.md/AGENTS.md, else CLAUDE.md)")
@@ -681,6 +794,9 @@ def _dispatch(a):
         print(install_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "uninstall-hook":
         print(uninstall_hook("global" if a.glob else "project", a.repo))
+    elif a.cmd == "test":
+        cmd = [c for c in (a.command or []) if c != "--"]
+        print(run_test(a.repo, cmd, jar=a.jar, pkgs=a.pkgs, ms=a.ms))
     elif a.cmd == "learn":
         idx = fresh_index(a.repo)
         if not idx:
