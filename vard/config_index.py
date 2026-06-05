@@ -16,20 +16,21 @@ _CFG_EXT = (".properties", ".yml", ".yaml", ".env")
 _SKIP_DIR = {".git", "target", "build", "node_modules", ".venv", ".vard", ".idea", "dist", "__pycache__"}
 _PROP_LINE = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$')
 
-# code -> config-key reads (the dominant frameworks; same shape as the resource ruleset)
-_READ_PATTERNS = [
-    re.compile(r'\$\{\s*([A-Za-z0-9_.\-]+)\s*(?::[^}]*)?\}'),          # Spring/${...} placeholders (incl :default)
-    re.compile(r'getProperty\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),       # Environment.getProperty("key")
-    re.compile(r'getRequiredProperty\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),
-    re.compile(r'System\.getenv\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),    # java env
-    re.compile(r'System\.getProperty\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),
-    re.compile(r'os\.getenv\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),        # python
-    re.compile(r'os\.environ(?:\.get)?\[?\s*["\']([A-Za-z0-9_.\-]+)["\']'),
-    re.compile(r'process\.env\.([A-Za-z0-9_]+)'),                      # js/ts
-    re.compile(r'process\.env\[\s*["\']([A-Za-z0-9_.\-]+)["\']'),
-    re.compile(r'os\.Getenv\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),        # go
-    re.compile(r'viper\.Get\w*\(\s*["\']([A-Za-z0-9_.\-]+)["\']'),
-]
+# code -> config-key reads, applied PER LANGUAGE (a `${...}` is a config placeholder in Java but a string
+# template in JS/Vue — applying it everywhere produced junk keys like `i`). Patterns chosen by file ext.
+_P_PLACEHOLDER = re.compile(r'\$\{\s*([A-Za-z0-9_.\-]+)\s*(?::[^}]*)?\}')      # Spring ${key} / ${key:default}
+_P_GETPROP = re.compile(r'get(?:Required)?Property\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
+_P_JAVA_ENV = re.compile(r'System\.get(?:env|Property)\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
+_P_PY = re.compile(r'os\.(?:getenv\(|environ(?:\.get)?\[?)\s*["\']([A-Za-z0-9_.\-]+)["\']')
+_P_JS = re.compile(r'process\.env(?:\.([A-Za-z0-9_]+)|\[\s*["\']([A-Za-z0-9_.\-]+)["\'])')
+_P_GO = re.compile(r'(?:os\.Getenv|viper\.Get\w*)\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
+
+_READ_BY_EXT = {
+    ".java": [_P_PLACEHOLDER, _P_GETPROP, _P_JAVA_ENV], ".kt": [_P_PLACEHOLDER, _P_GETPROP, _P_JAVA_ENV],
+    ".py": [_P_PY], ".pyi": [_P_PY],
+    ".js": [_P_JS], ".jsx": [_P_JS], ".ts": [_P_JS], ".tsx": [_P_JS], ".mjs": [_P_JS], ".cjs": [_P_JS],
+    ".go": [_P_GO],
+}
 
 
 def _norm(key):
@@ -95,50 +96,60 @@ def scan_config_defs(repo):
 
 
 def scan_config_reads(rg, repo):
-    """{norm_key: set(node_id)} — code symbols that read a config key."""
+    """{norm_key: set(node_id)} — code symbols that read a config key. Patterns are chosen by the file's
+    language, so a JS string template `${x}` is not mistaken for a Spring config placeholder."""
     cache, reads = {}, {}
     for n in ST._content_nodes(rg):
-        txt = ST._node_text(repo, n, cache)
-        if "${" not in txt and "getenv" not in txt.lower() and "getproperty" not in txt.lower() \
-           and "process.env" not in txt and "os.environ" not in txt and "viper.get" not in txt.lower():
+        pats = _READ_BY_EXT.get(os.path.splitext(n.file)[1].lower())
+        if not pats:
             continue
-        for rx in _READ_PATTERNS:
-            for key in rx.findall(txt):
-                reads.setdefault(_norm(key), set()).add(n.id)
+        txt = ST._node_text(repo, n, cache)
+        for rx in pats:
+            for m in rx.findall(txt):
+                key = m if isinstance(m, str) else next((g for g in m if g), "")  # _P_JS has 2 groups
+                if key and len(key) >= 2:
+                    reads.setdefault(_norm(key), set()).add(n.id)
     return reads
 
 
 def build_config_index(rg, repo):
+    """Store only the CODE-RELEVANT keys — those actually read in code (coupled, or read-but-undefined).
+    The 1000s of defined-but-unread keys (k8s manifests, test fixtures, framework defaults) are noise for
+    a code↔config coupling layer; arbitrary 'where is key X defined' lookups re-scan config files on demand."""
     defs = scan_config_defs(repo)
     reads = scan_config_reads(rg, repo)
     out = {}
-    for k in set(defs) | set(reads):
-        out[k] = {"defs": defs.get(k, []), "readers": sorted(reads.get(k, set()))}
+    for k in reads:
+        out[k] = {"defs": defs.get(k, []), "readers": sorted(reads[k])}
     return out
 
 
 # ---- query side -------------------------------------------------------------
 
-def lookup(cfg, rg, query):
-    """Config keys relevant to `query` (a key, a substring, or a symbol name whose code reads keys)."""
-    if not cfg:
-        return []
-    q = query.strip()
-    nq = _norm(q)
-    hits = []
-    for k, v in cfg.items():
-        if nq == k or nq in k or k in nq or any(q.lower() in d["key"].lower() for d in v["defs"]):
-            hits.append((k, v))
-    if not hits:                                   # try: a symbol that reads config
+def _match(q, nq, k, defs):
+    # exact, dotted-prefix either way, or a long-enough substring (avoids 1-2 char keys matching everything)
+    return (nq == k or k.startswith(nq + ".") or nq.startswith(k + ".")
+            or (len(nq) >= 4 and nq in k) or any(q.lower() in d["key"].lower() for d in defs if len(q) >= 4))
+
+
+def lookup(cfg, rg, query, repo=None):
+    """Config keys relevant to `query` (a key, a substring, or a symbol name whose code reads keys).
+    The stored index holds only code-read keys; for an arbitrary defined-but-unread key, re-scan on demand."""
+    cfg = cfg or {}
+    q = query.strip(); nq = _norm(q)
+    hits = [(k, v) for k, v in cfg.items() if _match(q, nq, k, v["defs"])]
+    if not hits:                                   # try: a symbol whose code reads config
         ids = {n.id for n in rg.nodes.values() if q in n.qual}
-        for k, v in cfg.items():
-            if ids & set(v["readers"]):
-                hits.append((k, v))
+        hits = [(k, v) for k, v in cfg.items() if ids & set(v["readers"])]
+    if not hits and repo:                          # fallback: defined-but-unread key, scanned live
+        for k, dl in scan_config_defs(repo).items():
+            if _match(q, nq, k, dl):
+                hits.append((k, {"defs": dl, "readers": []}))
     return hits
 
 
-def render(cfg, rg, query, limit=25):
-    hits = lookup(cfg, rg, query)
+def render(cfg, rg, query, repo=None, limit=25):
+    hits = lookup(cfg, rg, query, repo=repo)
     if not hits:
         return f"# No config keys match '{query}'."
     out = [f"# Config keys for: {query}"]

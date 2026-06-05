@@ -370,7 +370,7 @@ def config_text(query, repo):
     if not idx:
         return f"No index. Run: vard init {repo}"
     from . import config_index as CFG
-    return CFG.render(idx.get("config") or {}, idx["rg"], query)
+    return CFG.render(idx.get("config") or {}, idx["rg"], query, repo=os.path.abspath(repo))
 
 
 def remember_text(fact, citations, repo, reason=""):
