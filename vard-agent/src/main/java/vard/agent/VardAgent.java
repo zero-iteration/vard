@@ -32,11 +32,15 @@ public class VardAgent {
     public static void agentmain(String args, Instrumentation inst) { install(args, inst); }   // live attach
 
     private static void install(String args, Instrumentation inst) {
-        String pkgsRaw = System.getProperty("vard.pkgs", "");
+        // Options arrive two ways: -D system props (premain via JAVA_TOOL_OPTIONS) OR a "k=v;k=v" args string
+        // (agentmain via VirtualMachine.loadAgent — a live attach can't set -D on an already-running JVM).
+        Map<String, String> a = parseArgs(args);
+        String pkgsRaw = opt(a, "pkgs", "");
         final String[] pkgs = pkgsRaw.isEmpty() ? new String[0] : pkgsRaw.split(",");
-        final String out = System.getProperty("vard.out", ".vard/runtime-trace.jsonl");
-        Collector.configure(System.getProperty("vard.values", "*"),
-                            Integer.getInteger("vard.maxsamples", 8));
+        final String out = opt(a, "out", ".vard/runtime-trace.jsonl");
+        Collector.configure(opt(a, "values", "*"), Integer.parseInt(opt(a, "maxsamples", "8")),
+                            opt(a, "env", ""));
+        final int flushSecs = Integer.parseInt(opt(a, "flush", "0"));   // >0 → periodic snapshot (live attach)
 
         net.bytebuddy.matcher.ElementMatcher.Junction<net.bytebuddy.description.type.TypeDescription> typeM =
                 not(nameStartsWith("vard.")).and(not(nameStartsWith("vard.shaded.")))
@@ -48,9 +52,15 @@ public class VardAgent {
             typeM = typeM.and(any);
         }
 
+        System.err.println("[vard-agent] installing (pkgs=" + pkgsRaw + ", env=" + opt(a, "env", "")
+                           + ", flush=" + flushSecs + "s)");
         new AgentBuilder.Default()
+                // disableClassFormatChanges → REDEFINE (no added methods/fields), which RETRANSFORMATION of
+                // ALREADY-LOADED classes requires. Essential for live attach (agentmain), harmless for premain.
+                .disableClassFormatChanges()
                 .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
-                .with(AgentBuilder.TypeStrategy.Default.REDEFINE)
+                // default redefinition listener ignores per-class transform failures — on a real app some
+                // classes (proxies, generated) legitimately can't be instrumented; one failure must not abort.
                 .ignore(nameStartsWith("vard.").or(nameStartsWith("net.bytebuddy.")))
                 .type(typeM)
                 .transform((builder, td, cl, mod, pd) -> builder.visit(
@@ -60,6 +70,34 @@ public class VardAgent {
                 .installOn(inst);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> Collector.dump(out)));
+        if (flushSecs > 0) {                              // live attach: snapshot the trace while the app runs
+            Thread t = new Thread(() -> {
+                while (true) {
+                    try { Thread.sleep(flushSecs * 1000L); } catch (InterruptedException e) { return; }
+                    Collector.dump(out);
+                }
+            });
+            t.setDaemon(true);
+            t.setName("vard-flush");
+            t.start();
+        }
+    }
+
+    /** Parse a "k=v;k2=v2" agent-args string (agentmain) into a map. Null/empty → empty map. */
+    private static Map<String, String> parseArgs(String args) {
+        Map<String, String> m = new HashMap<>();
+        if (args == null || args.isEmpty()) return m;
+        for (String kv : args.split(";")) {
+            int i = kv.indexOf('=');
+            if (i > 0) m.put(kv.substring(0, i).trim(), kv.substring(i + 1).trim());
+        }
+        return m;
+    }
+
+    /** Option lookup: agent-args map first, then -Dvard.<key>, then default. */
+    private static String opt(Map<String, String> a, String key, String def) {
+        if (a.containsKey(key)) return a.get(key);
+        return System.getProperty("vard." + key, def);
     }
 
     /** Inlined into every instrumented method. Keep tiny; all real work is in Collector (never throws out). */
@@ -86,10 +124,12 @@ public class VardAgent {
         static final ThreadLocal<Deque<String>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
         static String[] valFilter = {"*"};
         static int maxSamples = 8;
+        static String env = "";
 
-        static void configure(String values, int max) {
+        static void configure(String values, int max, String envLabel) {
             valFilter = (values == null || values.isEmpty()) ? new String[]{"*"} : values.split(",");
             maxSamples = Math.max(1, max);
+            env = envLabel == null ? "" : envLabel;
         }
 
         public static void enter(String qual) {        // public: the Advice body is INLINED into app classes
@@ -159,7 +199,7 @@ public class VardAgent {
                     String prof = firstNonEmpty(System.getProperty("spring.profiles.active"),
                                                 System.getenv("SPRING_PROFILES_ACTIVE"));
                     w.println("{\"t\":\"config\",\"profile\":\"" + esc(prof == null ? "" : prof)
-                              + "\",\"mode\":\"instrument\"}");
+                              + "\",\"mode\":\"instrument\",\"env\":\"" + esc(env) + "\"}");
                     for (Map.Entry<String, long[]> m : methods.entrySet())
                         w.println("{\"t\":\"method\",\"qual\":\"" + esc(m.getKey()) + "\",\"hits\":" + m.getValue()[0] + "}");
                     for (Map.Entry<String, long[]> e : edges.entrySet()) {

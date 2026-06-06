@@ -662,7 +662,7 @@ def _derive_java_pkgs(idx, repo):
     return sorted(prefixes)
 
 
-def run_test(repo, command, jar=None, pkgs=None, ms="2"):
+def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None):
     """`vard test -- <cmd>`: run the dev's existing test command (default `mvn test`) under the VARD java
     agent, then merge the ground-truth trace (what actually executed + real call edges) into the runtime
     overlay. The dev runs the tests; VARD only listens — no app to stand up, it just needs to compile."""
@@ -680,6 +680,7 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2"):
     if pkgs is None:
         pkgs = ",".join(_derive_java_pkgs(idx, repo))
     cmd = command or ["mvn", "test"]
+    runenv = env or "test"                                # provenance label for this run (see per-env overlay)
     tracedir = os.path.join(os.path.abspath(repo), VDIR, "trace")
     if os.path.isdir(tracedir):
         for old in glob.glob(os.path.join(tracedir, "*")):
@@ -689,32 +690,82 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2"):
     outbase = os.path.join(tracedir, "run.jsonl")
     # JAVA_TOOL_OPTIONS reaches EVERY JVM the build spawns — including the JVM Surefire forks for the actual
     # tests (which -javaagent via MAVEN_OPTS would miss). The agent writes one per-PID file per JVM.
-    jto = f"-javaagent:{jarp} -Dvard.out={outbase} -Dvard.ms={ms}" + (f" -Dvard.pkgs={pkgs}" if pkgs else "")
-    env = dict(os.environ)
-    env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") + " " + jto).strip()
-    print(f"→ vard: running `{' '.join(cmd)}` under the agent (pkgs: {pkgs or 'all app classes'})...", file=sys.stderr)
+    jto = (f"-javaagent:{jarp} -Dvard.out={outbase} -Dvard.ms={ms} -Dvard.env={runenv}"
+           + (f" -Dvard.pkgs={pkgs}" if pkgs else ""))
+    jenv = dict(os.environ)
+    jenv["JAVA_TOOL_OPTIONS"] = (jenv.get("JAVA_TOOL_OPTIONS", "") + " " + jto).strip()
+    print(f"→ vard: running `{' '.join(cmd)}` under the agent (env={runenv}, pkgs: {pkgs or 'all app classes'})...", file=sys.stderr)
     try:
-        rc = subprocess.run(cmd, cwd=os.path.abspath(repo), env=env).returncode
+        rc = subprocess.run(cmd, cwd=os.path.abspath(repo), env=jenv).returncode
     except FileNotFoundError:
         return f"vard test: command not found: {cmd[0]}"
+    return _ingest_traces(idx, repo, tracedir, env=runenv,
+                          header=f"✓ vard test: exit {rc}; ", clean=True)
+
+
+def _ingest_traces(idx, repo, tracedir, env, header, clean):
+    """Merge every per-PID trace file in `tracedir` into the runtime overlay under `env`. Shared by
+    `vard test` and `vard attach`."""
+    import glob
     from . import runtime as RT
     traces = sorted(glob.glob(os.path.join(tracedir, "run.jsonl.*")))
     if not traces:
-        return (f"vard test: tests ran (exit {rc}) but no trace was captured. The forked test JVM may not "
-                "have honored JAVA_TOOL_OPTIONS, or no app classes (pkgs filter) executed.")
-    tot = {"methods": 0, "edges": 0, "unresolved": 0}
+        return (header + "no trace captured. The target JVM may not have honored the agent, or no app "
+                "classes (pkgs filter) executed.")
+    tot = {"methods": 0, "edges": 0, "values": 0, "unresolved": 0, "runs": []}
     for tp in traces:
-        r = RT.ingest(idx, repo, tp)
+        r = RT.ingest(idx, repo, tp, env=env)
         if r.get("ok"):
-            tot = {"methods": r["methods"], "edges": r["edges"],          # ingest returns cumulative totals
-                   "unresolved": tot["unresolved"] + r.get("unresolved", 0)}
-    for tp in traces:
-        try: os.remove(tp)
+            tot.update(methods=r["methods"], edges=r["edges"], values=r["values"], runs=r["runs"])
+            tot["unresolved"] += r.get("unresolved", 0)
+    if clean:
+        for tp in traces:
+            try: os.remove(tp)
+            except OSError: pass
+    return (header + f"merged {len(traces)} JVM trace(s) into env='{env}' → runtime overlay\n"
+            f"  {tot['methods']} methods confirmed live, {tot['edges']} real call edges, {tot['values']} with values"
+            + (f"  ({tot['unresolved']} unmatched)" if tot["unresolved"] else "")
+            + f"\n  runs in overlay: {', '.join(tot['runs'])}"
+            + f"\n  → context/impact/explain now use these as runtime-confirmed (ground truth).")
+
+
+def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5):
+    """`vard attach <pid>`: load the agent into an ALREADY-RUNNING JVM (no restart), let it run for `for_secs`
+    while you exercise it (the agent flushes a trace every `flush`s), then merge what it observed under `env`.
+    The way to ground ACTUAL against a live local/staging server, not just the test suite."""
+    import subprocess, glob
+    repo = _project_root(repo)
+    jarp = _agent_jar(jar)
+    if not jarp:
+        return "vard attach: agent jar not found — build it with `bash vard-agent/build.sh` (or pass --jar)."
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    if pkgs is None:
+        pkgs = ",".join(_derive_java_pkgs(idx, repo))
+    tracedir = os.path.join(os.path.abspath(repo), VDIR, "trace")
+    for old in glob.glob(os.path.join(tracedir, "*")):
+        try: os.remove(old)
         except OSError: pass
-    return (f"✓ vard test: tests exit {rc}; merged {len(traces)} JVM trace(s) → runtime overlay\n"
-            f"  {tot['methods']} methods confirmed live, {tot['edges']} real call edges"
-            + (f"  ({tot['unresolved']} trace quals unmatched to nodes)" if tot["unresolved"] else "")
-            + f"\n  → context/impact now mark these as runtime-confirmed (ground truth).")
+    os.makedirs(tracedir, exist_ok=True)
+    outbase = os.path.join(tracedir, "run.jsonl")
+    # agentmain can't read -D on a running JVM, so options ride in the loadAgent args string (k=v;...)
+    agent_args = f"out={outbase};values=*;env={env};flush={flush}" + (f";pkgs={pkgs}" if pkgs else "")
+    java = os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java"
+    print(f"→ vard: attaching agent to pid {pid} (env={env}, flush={flush}s)...", file=sys.stderr)
+    try:
+        a = subprocess.run([java, "-cp", jarp, "vard.agent.Attacher", str(pid), jarp, agent_args],
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return "vard attach: `java` not found on PATH (set JAVA_HOME or add java to PATH)."
+    if a.returncode != 0:
+        return (f"vard attach: failed to attach to pid {pid}.\n  {(a.stderr or a.stdout).strip()[:300]}\n"
+                "  (the target must be a JVM you own; same-user only.)")
+    import time
+    print(f"→ vard: attached. Exercise the app now — observing for {for_secs}s...", file=sys.stderr)
+    time.sleep(for_secs)
+    return _ingest_traces(idx, repo, tracedir, env=env,
+                          header=f"✓ vard attach: pid {pid} observed {for_secs}s; ", clean=True)
 
 
 def main():
@@ -754,8 +805,16 @@ def main():
     ptt = sub.add_parser("test", help="run the test suite under the JVM agent → merge ground-truth runtime trace")
     ptt.add_argument("--repo", default="."); ptt.add_argument("--jar", default=None, help="path to vard-agent.jar")
     ptt.add_argument("--pkgs", default=None, help="comma class-prefixes to trace (default: auto from repo)")
-    ptt.add_argument("--ms", default="2", help="stack-sampling interval (ms)")
-    ptt.add_argument("command", nargs=argparse.REMAINDER, help="test command after -- (default: mvn test)")
+    ptt.add_argument("--ms", default="2", help="stack-sampling interval (ms; sampler fallback only)")
+    ptt.add_argument("--env", default="test", help="provenance label for this run (e.g. test, local, staging)")
+    ptt.add_argument("command", nargs=argparse.REMAINDER, help="command after -- (default: mvn test)")
+    pat = sub.add_parser("attach", help="attach the agent to an ALREADY-RUNNING JVM (no restart) + observe")
+    pat.add_argument("pid", help="target JVM process id (same user)")
+    pat.add_argument("--repo", default="."); pat.add_argument("--jar", default=None)
+    pat.add_argument("--pkgs", default=None, help="class-prefixes to trace (default: auto from repo)")
+    pat.add_argument("--env", default="local", help="provenance label (e.g. local, staging, prod)")
+    pat.add_argument("--for", dest="for_secs", type=int, default=30, help="seconds to observe before merging")
+    pat.add_argument("--flush", type=int, default=5, help="agent trace-flush interval (seconds)")
     pru = sub.add_parser("rules", help="print (or --write) agent routing rules for CLAUDE.md / AGENTS.md")
     pru.add_argument("repo", nargs="?", default="."); pru.add_argument("--write", action="store_true")
     pru.add_argument("--file", default=None, help="target file (default: existing CLAUDE.md/AGENTS.md, else CLAUDE.md)")
@@ -829,7 +888,9 @@ def _dispatch(a):
         print(uninstall_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "test":
         cmd = [c for c in (a.command or []) if c != "--"]
-        print(run_test(a.repo, cmd, jar=a.jar, pkgs=a.pkgs, ms=a.ms))
+        print(run_test(a.repo, cmd, jar=a.jar, pkgs=a.pkgs, ms=a.ms, env=a.env))
+    elif a.cmd == "attach":
+        print(attach_run(a.pid, a.repo, jar=a.jar, pkgs=a.pkgs, env=a.env, for_secs=a.for_secs, flush=a.flush))
     elif a.cmd == "learn":
         idx = fresh_index(a.repo)
         if not idx:

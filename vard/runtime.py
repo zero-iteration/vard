@@ -47,64 +47,81 @@ def _resolve_qual(qual2ids, trace_qual):
     return None
 
 
-def ingest(idx, repo, trace_path):
-    """Parse the agent's JSONL trace, resolve method quals to VARD nodes, persist runtime-confirmed
-    methods + real call edges (each method anchored with a freshness hash). Accretes: merges with any
-    prior runtime.json (a method/edge seen in any run stays confirmed until its code changes)."""
+def _add_env(envs, env, n):
+    envs[env] = envs.get(env, 0) + int(n)
+
+
+def ingest(idx, repo, trace_path, env=None):
+    """Parse the agent's JSONL trace, resolve method quals to VARD nodes, persist runtime-confirmed methods +
+    real call edges + observed values, each TAGGED with the env that produced it. Accretes: merges with any
+    prior runtime.json (an observation seen in any run stays until its code changes), but keeps per-env counts
+    so a merged overlay never conflates a test-path run with a prod/local one. Effective env =
+    explicit `env` arg > the trace's own env label > its active profile > 'default'."""
     rg = idx["rg"]
     q2i = _qual_index(rg)
     prior = load(repo)
     methods = {m["anchor"]: m for m in prior.get("methods", []) if m["anchor"] in rg.nodes}
     edgeset = {(e["caller"], e["callee"]): e for e in prior.get("edges", [])
                if e["caller"] in rg.nodes and e["callee"] in rg.nodes}
-    valuemap = {a: {s["v"]: int(s["n"]) for s in samples}                 # anchor -> {sample-string: count}
+    valuemap = {a: {s["v"]: dict(s.get("envs", {})) for s in samples}     # anchor -> {sample-string -> {env:n}}
                 for a, samples in prior.get("values", {}).items() if a in rg.nodes}
-    config = dict(prior.get("config", {}))
+    runs = dict(prior.get("runs", {}))
+    try:
+        lines = [l.strip() for l in open(trace_path, encoding="utf-8", errors="ignore") if l.strip()]
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    # resolve the effective env BEFORE tagging observations (the config record carries env+profile+mode)
+    cfg = next((json.loads(l) for l in lines if '"t":"config"' in l.replace(" ", "")), {})
+    try:
+        cfg = cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        cfg = {}
+    eff_env = (env or cfg.get("env") or cfg.get("profile") or "default").strip() or "default"
+    runs[eff_env] = {"profile": cfg.get("profile", ""), "mode": cfg.get("mode", "sample")}
     unresolved = 0
     try:
-        for line in open(trace_path, encoding="utf-8", errors="ignore"):
-            line = line.strip()
-            if not line:
-                continue
+        for line in lines:
             o = json.loads(line)
-            if o.get("t") == "method":
+            t = o.get("t")
+            if t == "method":
                 nid = _resolve_qual(q2i, o["qual"])
                 if not nid:
                     unresolved += 1; continue
                 n = rg.nodes[nid]
-                prev = methods.get(nid, {}).get("hits", 0)
-                methods[nid] = {"anchor": nid, "file": n.file, "qual": n.qual,
-                                "hits": prev + int(o.get("hits", 0)),
-                                "hash": MEM._anchor_hash(idx, repo, nid)}
-            elif o.get("t") == "edge":
+                m = methods.get(nid) or {"anchor": nid, "file": n.file, "qual": n.qual, "envs": {}}
+                m.setdefault("envs", {})
+                _add_env(m["envs"], eff_env, o.get("hits", 0))
+                m["hits"] = sum(m["envs"].values())
+                m["hash"] = MEM._anchor_hash(idx, repo, nid)
+                methods[nid] = m
+            elif t == "edge":
                 ca, ce = _resolve_qual(q2i, o["caller"]), _resolve_qual(q2i, o["callee"])
                 if not (ca and ce) or ca == ce:
                     continue
-                key = (ca, ce)
-                prev = edgeset.get(key, {}).get("n", 0)
-                edgeset[key] = {"caller": ca, "callee": ce, "n": prev + int(o.get("n", 1))}
-            elif o.get("t") == "value":                                  # observed (args ⇒ ret) samples
+                e = edgeset.get((ca, ce)) or {"caller": ca, "callee": ce, "envs": {}}
+                e.setdefault("envs", {})
+                _add_env(e["envs"], eff_env, o.get("n", 1))
+                e["n"] = sum(e["envs"].values())
+                edgeset[(ca, ce)] = e
+            elif t == "value":
                 nid = _resolve_qual(q2i, o["qual"])
                 if not nid:
                     unresolved += 1; continue
                 bucket = valuemap.setdefault(nid, {})
                 for s in o.get("samples", []):
-                    bucket[s["v"]] = bucket.get(s["v"], 0) + int(s.get("n", 1))
-            elif o.get("t") == "config":                                 # trace fingerprint (active profile)
-                if o.get("profile"):
-                    config["profile"] = o["profile"]
-                config["mode"] = o.get("mode", config.get("mode", "sample"))
+                    _add_env(bucket.setdefault(s["v"], {}), eff_env, s.get("n", 1))
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
-    # cap stored value samples per method (richest-first) so the overlay can't bloat
-    values_out = {a: [{"v": v, "n": n} for v, n in sorted(b.items(), key=lambda kv: -kv[1])[:8]]
+    # cap stored value samples per method (most-observed first) so the overlay can't bloat
+    values_out = {a: [{"v": v, "n": sum(envs.values()), "envs": envs}
+                      for v, envs in sorted(b.items(), key=lambda kv: -sum(kv[1].values()))[:8]]
                   for a, b in valuemap.items()}
     data = {"methods": list(methods.values()), "edges": list(edgeset.values()),
-            "values": values_out, "config": config}
+            "values": values_out, "runs": runs}
     os.makedirs(os.path.dirname(_path(repo)), exist_ok=True)
     json.dump(data, open(_path(repo), "w"), indent=2)
-    return {"ok": True, "methods": len(methods), "edges": len(edgeset),
-            "values": len(values_out), "unresolved": unresolved}
+    return {"ok": True, "env": eff_env, "methods": len(methods), "edges": len(edgeset),
+            "values": len(values_out), "runs": sorted(runs), "unresolved": unresolved}
 
 
 def load(repo):
@@ -160,8 +177,10 @@ def attach(idx, repo):
                            if e[0] in conf and e[1] in conf]
         # observed values only for FRESH methods — if the code changed, its old values are stale too
         idx["rt_values"] = {a: s for a, s in data.get("values", {}).items() if a in conf}
-        idx["rt_config"] = data.get("config", {})        # trace fingerprint (active profile, capture mode)
+        idx["rt_runs"] = data.get("runs", {})            # {env: {profile, mode}} — the run/profile registry
+        idx["rt_method_envs"] = {m["anchor"]: m.get("envs", {})           # which env(s) each method ran under
+                                 for m in data.get("methods", []) if m["anchor"] in conf}
     except Exception:
         idx["rt_confirmed"] = set(); idx["rt_traced"] = set(); idx["rt_edges"] = []
-        idx["rt_values"] = {}; idx["rt_config"] = {}
+        idx["rt_values"] = {}; idx["rt_runs"] = {}; idx["rt_method_envs"] = {}
     return idx

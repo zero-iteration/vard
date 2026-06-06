@@ -170,28 +170,37 @@ def explain(idx, repo, target, k=8):
     rt_conf = idx.get("rt_confirmed") or set()
     rt_traced = idx.get("rt_traced") or set()        # ever-observed (ignores freshness)
     rt_edges = idx.get("rt_edges") or []
-    rt_values = idx.get("rt_values") or {}           # anchor -> [{v: "(args) => ret", n}] (instrumentation)
-    rt_config = idx.get("rt_config") or {}
+    rt_values = idx.get("rt_values") or {}           # anchor -> [{v, n, envs}] (instrumentation)
+    rt_runs = idx.get("rt_runs") or {}               # {env: {profile, mode}}
+    rt_method_envs = idx.get("rt_method_envs") or {} # anchor -> {env: hits}
     has_runtime = bool(rt_conf or rt_traced)
+
+    def _is_testish(env):                            # an env/profile that looks like a test path, not prod
+        e = (env or "").lower()
+        prof = (rt_runs.get(env, {}).get("profile") or "").lower()
+        return "test" in e or "test" in prof or e == "default"
 
     hdr = f"# Explain: {target}"
     if ticket:
         hdr += f"  (ticket {ticket} → {tfile})"
     out = [hdr, f"_actual-vs-expected for {tfile} — every line tagged with how we know it_\n"]
 
-    # ---------- ACTUAL (grounded): what we observed run, with the real values ----------
-    prof = rt_config.get("profile")
-    mode = rt_config.get("mode")
-    fp = (f" — confirmed under profile={prof}" if prof else
-          (" — profile not captured; can't tell test-path from prod-path" if has_runtime and mode != "instrument" else ""))
-    out.append(f"## ACTUAL — what actually runs (observed{fp})")
+    # ---------- ACTUAL (grounded): what we observed run, under which env, with the real values ----------
+    if rt_runs:
+        runlbl = ", ".join(f"{e}(profile={v.get('profile') or '?'})" for e, v in rt_runs.items())
+        runfp = f" — runs merged in: {runlbl}"
+    else:
+        runfp = " — no run captured" if not has_runtime else " — env not captured"
+    out.append(f"## ACTUAL — what actually runs (observed{runfp})")
     if not has_runtime:
-        out.append("  [unverified] no runtime trace for this repo — run `vard test -- <cmd>` to ground this leg.")
+        out.append("  [unverified] no runtime trace for this repo — run `vard test -- <cmd>` (or `vard attach <pid>`) to ground this leg.")
     else:
         confirmed_here = [n for n in syms if n.id in rt_conf]
         stale_here = [n for n in syms if n.id in rt_traced and n.id not in rt_conf]
         for n in confirmed_here[:k]:
-            out.append(f"  [confirmed-runtime] {n.qual}  ({n.file}:{n.start}) — observed executing")
+            envs = rt_method_envs.get(n.id, {})
+            envlbl = f"  [under {', '.join(sorted(envs))}]" if envs else ""
+            out.append(f"  [confirmed-runtime] {n.qual}  ({n.file}:{n.start}) — observed executing{envlbl}")
             for s in (rt_values.get(n.id) or [])[:4]:    # the agent-uncatchable fact: real args ⇒ real return
                 out.append(f"      [observed-value] {n.name}{s['v']}   ({s['n']}x)")
         for n in stale_here[:k]:                      # observed in an earlier run, but the code changed since
@@ -290,8 +299,13 @@ def explain(idx, repo, target, k=8):
     unc = []
     if not has_runtime:
         unc.append("the ACTUAL leg is ungrounded (no trace) — claims about what runs are unconfirmed.")
-    if cfg_here and not any(len({val for val, _, _ in defs}) > 1 for _, defs in cfg_here):
-        pass
+    # masquerade guard: if every confirmed method here was only seen under a test-ish env, ACTUAL is the
+    # TEST path, not necessarily prod. Don't let a test-profile run pass for prod truth.
+    if has_runtime and confirmed_here:
+        seen_envs = set().union(*[set(rt_method_envs.get(n.id, {})) for n in confirmed_here]) or set()
+        if seen_envs and all(_is_testish(e) for e in seen_envs):
+            unc.append(f"everything here was observed only under a test path ({', '.join(sorted(seen_envs))}) — "
+                       f"this may NOT match prod. Trace prod/staging with `vard attach <pid> --env prod` to confirm.")
     if exp and not has_runtime:
         unc.append("expectations are recorded but cannot be checked against a run — capture a trace to confirm them.")
     if unc:
