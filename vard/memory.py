@@ -239,17 +239,23 @@ def explain(idx, repo, target, k=8):
     if ticket and tickets_map.get(ticket) or (ticket and tickets_map.get(ticket.lstrip("#"))):
         out.append(f"  [ticket] {tickets_map.get(ticket) or tickets_map.get(ticket.lstrip('#'))}")
 
-    # ---------- CONFIG: settings that steer it ----------
+    # ---------- CONFIG: settings that steer it (file value AND the value observed live) ----------
+    from . import config_index as _CFG
     cfg = idx.get("config") or {}
-    cfg_here = []                                          # (key, [ (value,file,line) ... ])
+    rt_cfgvals = idx.get("rt_config_values") or {}        # norm_key -> {value, n, envs} observed at runtime
+    cfg_here = []                                          # (display_key, norm_key, [(value,file,line)...])
     for key, v in cfg.items():
         if set(v["readers"]) & focus_ids and v.get("defs"):
-            cfg_here.append((v["defs"][0]["key"], [(d["value"], d["file"], d["line"]) for d in v["defs"]]))
+            cfg_here.append((v["defs"][0]["key"], key, [(d["value"], d["file"], d["line"]) for d in v["defs"]]))
     if cfg_here:
-        out.append("\n## CONFIG — settings this code reads (steers behavior, not in the code)")
-        for key, defs in cfg_here[:k]:
+        out.append("\n## CONFIG — settings this code reads (file value vs the value observed live)")
+        for disp, nkey, defs in cfg_here[:k]:
             vals = "; ".join(f"{val} ({os.path.basename(f)}:{ln})" for val, f, ln in defs[:4])
-            out.append(f"  [config] {key} = {vals}")
+            line = f"  [config] {disp} = {vals}"
+            obs = rt_cfgvals.get(nkey)
+            if obs:
+                line += f"   [observed-live] = {obs['value']} (under {', '.join(sorted(obs['envs'])) or 'run'})"
+            out.append(line)
 
     # ---------- DIVERGENCE: groundable conflicts (the undeniable part) ----------
     div = []
@@ -283,13 +289,25 @@ def explain(idx, repo, target, k=8):
                 vs = "; ".join(s["v"] for s in obs[:3])
                 div.append(f"[divergence-check] you expect “{m['fact'][:70]}” at {rg.nodes[a].qual}; it was "
                            f"OBSERVED returning: {vs} — confirm the numbers actually agree with that.")
-    # D3 config-profile ambiguity: a key this code reads has multiple defs with DIFFERENT values → which wins?
-    for key, defs in cfg_here:
+    # D4 config OVERRIDE (file value ≠ observed live value): the runtime resolved a config key to something the
+    # files don't say — a consul/env/Properties override is active, and the file value is NOT what runs. This is
+    # the exact 'Cheapest in config, but V3 actually ran' confident-wrong that grounding must prevent.
+    for disp, nkey, defs in cfg_here:
+        obs = rt_cfgvals.get(nkey)
+        if not obs:
+            continue
+        file_vals = {val for val, _, _ in defs}
+        if obs["value"] not in file_vals:
+            div.append(f"[divergence] config `{disp}`: files say {', '.join(sorted(file_vals)[:4])}, but RUNTIME "
+                       f"observed `{obs['value']}` — a runtime override (consul/env/args) is active; the file value "
+                       f"is NOT what runs. Trust the observed value.")
+    # D3 config-profile ambiguity: multiple file values and we did NOT observe which one is live → which wins?
+    for disp, nkey, defs in cfg_here:
         distinct = {val for val, _, _ in defs}
-        if len(distinct) > 1:
-            div.append(f"[divergence] behavior depends on `{key}`, defined with conflicting values "
+        if len(distinct) > 1 and nkey not in rt_cfgvals:
+            div.append(f"[divergence] behavior depends on `{disp}`, defined with conflicting values "
                        f"({', '.join(sorted(distinct)[:4])}) across profiles — which one is live depends on the "
-                       f"active profile, which the trace does NOT capture. Verify the running profile.")
+                       f"active profile/override, NOT observed in this trace. Verify the running value.")
     if div:
         out.append("\n## DIVERGENCE — where ACTUAL and EXPECTED don't line up")
         for d in div:

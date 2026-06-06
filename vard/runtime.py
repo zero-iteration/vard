@@ -162,6 +162,43 @@ def traced_anchors(idx, repo):
     return {m["anchor"] for m in load(repo).get("methods", []) if m["anchor"] in rg.nodes}
 
 
+_ARG_STR = __import__("re").compile(r'"([^"]+)"')
+
+
+def observed_config_values(idx):
+    """The agent-uncatchable config fact: the LIVE value a config key actually resolved to at runtime —
+    which is simply the observed RETURN of a config-getter method called with that key. We scan captured
+    value samples for `("<key>") => <value>` where <key> is a known config key, so a runtime override
+    (consul/env/Properties) that differs from the file value becomes visible. Truthful: observed, not guessed.
+    Returns {norm_key: {value, n, envs, anchor}}."""
+    cfg = idx.get("config") or {}
+    if not cfg:
+        return {}
+    from .config_index import _norm
+    keyset = set(cfg.keys())
+    out = {}
+    for anchor, samples in (idx.get("rt_values") or {}).items():
+        for s in samples:
+            v = s.get("v", "")
+            if " => " not in v:
+                continue
+            argpart, ret = v.split(" => ", 1)
+            m = _ARG_STR.search(argpart)                 # first quoted arg = the key passed to the getter
+            if not m:
+                continue
+            key = _norm(m.group(1))
+            if key not in keyset:
+                continue
+            rv = ret.strip()
+            if rv.startswith('"') and rv.endswith('"'):
+                rv = rv[1:-1]
+            rec = out.setdefault(key, {"value": rv, "n": 0, "anchor": anchor, "envs": {}})
+            rec["n"] += s.get("n", 0)
+            for e, c in s.get("envs", {}).items():
+                rec["envs"][e] = rec["envs"].get(e, 0) + c
+    return out
+
+
 def attach(idx, repo):
     """Compute the freshness-checked runtime overlay once and stash it on idx for rank/impact/context/explain.
     No-op cost when there's no trace. Sets idx['rt_confirmed'] (fresh, observed node ids), idx['rt_edges']
@@ -180,7 +217,8 @@ def attach(idx, repo):
         idx["rt_runs"] = data.get("runs", {})            # {env: {profile, mode}} — the run/profile registry
         idx["rt_method_envs"] = {m["anchor"]: m.get("envs", {})           # which env(s) each method ran under
                                  for m in data.get("methods", []) if m["anchor"] in conf}
+        idx["rt_config_values"] = observed_config_values(idx)            # key -> live observed value
     except Exception:
         idx["rt_confirmed"] = set(); idx["rt_traced"] = set(); idx["rt_edges"] = []
-        idx["rt_values"] = {}; idx["rt_runs"] = {}; idx["rt_method_envs"] = {}
+        idx["rt_values"] = {}; idx["rt_runs"] = {}; idx["rt_method_envs"] = {}; idx["rt_config_values"] = {}
     return idx

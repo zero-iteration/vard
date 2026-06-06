@@ -25,6 +25,13 @@
     <build>
         <finalName>vard-agent</finalName>
         <plugins>
+            <!-- pin the compiler plugin: old defaults ignore <release>, so the agent silently built for the
+                 running JDK (e.g. 17) and failed to load on JDK 11 repos. 3.13+ honors release=11. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>

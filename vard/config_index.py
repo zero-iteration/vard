@@ -19,7 +19,10 @@ _PROP_LINE = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$')
 # code -> config-key reads, applied PER LANGUAGE (a `${...}` is a config placeholder in Java but a string
 # template in JS/Vue — applying it everywhere produced junk keys like `i`). Patterns chosen by file ext.
 _P_PLACEHOLDER = re.compile(r'\$\{\s*([A-Za-z0-9_.\-]+)\s*(?::[^}]*)?\}')      # Spring ${key} / ${key:default}
-_P_GETPROP = re.compile(r'get(?:Required)?Property\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
+# getProperty / getRequiredProperty / getPropertyValue(...) — the last is many apps' dominant custom-config
+# accessor and was previously missed. (Spring BeanWrapper also has getPropertyValue; the observed-live value
+# join is precise regardless, and undefined-key noise is bounded by the index storing only code-read keys.)
+_P_GETPROP = re.compile(r'get(?:Required)?Property(?:Value)?\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
 _P_JAVA_ENV = re.compile(r'System\.get(?:env|Property)\(\s*["\']([A-Za-z0-9_.\-]+)["\']')
 _P_PY = re.compile(r'os\.(?:getenv\(|environ(?:\.get)?\[?)\s*["\']([A-Za-z0-9_.\-]+)["\']')
 _P_JS = re.compile(r'process\.env(?:\.([A-Za-z0-9_]+)|\[\s*["\']([A-Za-z0-9_.\-]+)["\'])')

@@ -143,13 +143,21 @@ public class VardAgent {
             } catch (Throwable ignore) { }
         }
 
+        // method names that handle secrets — their captured args/returns are REDACTED (a captured decrypted
+        // password is exactly the leak we must not produce). Bounded types already block object dumps; this
+        // guards the string/number values that ARE captured.
+        static final java.util.regex.Pattern SECRET = java.util.regex.Pattern.compile(
+                "(?i)(password|passwd|secret|token|credential|apikey|api_key|privatekey|decrypt|encrypt|cipher|signature)");
+
         public static void exit(String qual, Object[] argv, Object ret, Throwable thrown) {
             try {
                 Deque<String> st = STACK.get();
                 if (!st.isEmpty()) st.pop();
                 if (!captureValues(qual)) return;
-                String key = sig(argv) + " => " + (thrown != null
-                        ? "throw " + thrown.getClass().getSimpleName() : safe(ret));
+                String key = SECRET.matcher(qual).find()
+                        ? "<redacted: secret-handling method>"
+                        : sig(argv) + " => " + (thrown != null
+                                ? "throw " + thrown.getClass().getSimpleName() : safe(ret));
                 Map<String, long[]> m = values.computeIfAbsent(qual, k -> new ConcurrentHashMap<>());
                 long[] c = m.get(key);
                 if (c != null) c[0]++;
