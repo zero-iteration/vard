@@ -266,18 +266,21 @@ def couplings_text(repo, limit=40):
     return "\n".join(lines)
 
 
-def context_text(task, repo, k=8, hypothetical=None):
+def context_text(task, repo, k=8, hypothetical=None, runtime_mode=None):
     """hypothetical: optional HyDE snippet — a guess of what the relevant code looks like
     (the calling agent can supply this for free). Bridges the symptom→code vocabulary gap;
-    lifts behavioral-issue recall ~+60%. Additive."""
+    lifts behavioral-issue recall ~+60%. Additive.
+    runtime_mode: off/fused/prior/tag — which runtime ranking arm to use (None → auto)."""
     idx = fresh_index(repo)
     if not idx: return f"No index. Run: vard init {repo}"
     rg, res = idx["rg"], idx["res"]
     from . import rank as RK
     from . import selflabel as SL
+    rt_mode = RK.resolve_runtime_mode(idx, runtime_mode)
     nodes = [n for n in rg.nodes.values() if n.type in ("function", "method", "class")]
     score, hfiles = RK.rank_nodes(idx, task, repo, nodes, hypothetical=hypothetical,
-                                  weights=SL.load_weights(repo))   # per-repo learned weights if present
+                                  weights=SL.load_weights(repo),   # per-repo learned weights if present
+                                  runtime_mode=rt_mode)
     top = sorted(score, key=score.get, reverse=True)[:k]; topset = set(top)
     fn2res = {}
     for rid in res["nodes"]:
@@ -301,9 +304,10 @@ def context_text(task, repo, k=8, hypothetical=None):
             out.append(f"- {n.file}:{n.start}-{n.end}  {n.qual}   ⮂ {why}")
     # runtime-confirmed: ground truth from `vard test` — code we SAW execute + the REAL call edges among
     # the top hits' neighbors. Agent-uncatchable (it can't run the code); shown as confirmed, not inferred.
+    # Hidden in 'off' mode so that arm is a true static baseline for A/B comparison.
     rt_conf = idx.get("rt_confirmed") or set()
     rt_edges = idx.get("rt_edges") or []
-    if rt_conf:
+    if rt_conf and rt_mode != "off":
         confirmed_top = [nid for nid in top if nid in rt_conf]
         rt_neigh = {}                                        # neighbor -> (direction, anchor) via real call edges
         for ca, ce, _n in rt_edges:
@@ -724,6 +728,8 @@ def main():
     pi.add_argument("--deps", action="store_true", help="auto-discover + index co-located source dependencies")
     pc = sub.add_parser("couplings"); pc.add_argument("repo", nargs="?", default="."); pc.add_argument("--limit", type=int, default=40)
     px = sub.add_parser("context"); px.add_argument("task"); px.add_argument("repo", nargs="?", default="."); px.add_argument("-k", type=int, default=8); px.add_argument("--hypothetical", default=None)
+    px.add_argument("--runtime", dest="runtime_mode", default=None, choices=["off", "fused", "prior", "tag"],
+                    help="runtime ranking arm (default: auto — fused if a trace exists, else off)")
     pca = sub.add_parser("candidates"); pca.add_argument("task"); pca.add_argument("repo", nargs="?", default=".")
     pm = sub.add_parser("impact"); pm.add_argument("target"); pm.add_argument("repo", nargs="?", default=".")
     pr = sub.add_parser("resource"); pr.add_argument("name"); pr.add_argument("repo", nargs="?", default=".")
@@ -795,7 +801,7 @@ def _dispatch(a):
     elif a.cmd == "couplings":
         print(couplings_text(a.repo, a.limit))
     elif a.cmd == "context":
-        print(context_text(a.task, a.repo, a.k, a.hypothetical))
+        print(context_text(a.task, a.repo, a.k, a.hypothetical, runtime_mode=a.runtime_mode))
     elif a.cmd == "candidates":
         print(candidates_text(a.task, a.repo))
     elif a.cmd == "impact":

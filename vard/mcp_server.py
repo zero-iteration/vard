@@ -35,14 +35,17 @@ def _safe(fn):
 
 @mcp.tool()
 @_safe
-def vard_context(task: str, repo: str, k: int = 8, hypothetical: str = "") -> str:
+def vard_context(task: str, repo: str, k: int = 8, hypothetical: str = "", runtime_mode: str = "") -> str:
     """Retrieve code relevant to a task/bug, INCLUDING functions coupled through shared
     data (cache/DB/queue) and files that similar past changes touched — context grep and
     embeddings miss. Index auto-builds/refreshes only on change (instant otherwise).
     TIP: if you can guess what the relevant code looks like, pass a short hypothetical code
     snippet as `hypothetical` (function/method names, key calls). It bridges the
-    description→code vocabulary gap and sharply improves recall on behavioral issues (HyDE)."""
-    return cli.context_text(task, repo, k, hypothetical or None)
+    description→code vocabulary gap and sharply improves recall on behavioral issues (HyDE).
+    runtime_mode (off/fused/prior/tag, default auto): how to use the runtime overlay from `vard test` —
+    'fused' amplifies code observed running + real-call-graph proximity; 'off' is the pure static ranking;
+    'tag' shows what ran without changing the order. Runtime can only promote (never hurts recall)."""
+    return cli.context_text(task, repo, k, hypothetical or None, runtime_mode=runtime_mode or None)
 
 
 @mcp.tool()
