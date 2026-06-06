@@ -426,17 +426,33 @@ def config_text(query, repo):
     return CFG.render(idx.get("config") or {}, idx["rg"], query, repo=os.path.abspath(repo))
 
 
-def remember_text(fact, citations, repo, reason=""):
-    """Write path: persist a code-anchored fact. citations = comma-separated symbols/files."""
+def remember_text(fact, citations, repo, reason="", kind="mechanism"):
+    """Write path: persist a code-anchored fact. citations = comma-separated symbols/files.
+    kind ∈ {mechanism, expectation, observation} — which side of the actual-vs-expected join it feeds."""
     idx = fresh_index(repo)
     if not idx:
         return f"No index. Run: vard init {repo}"
     from . import memory as MEM
     cites = [c.strip() for c in citations.split(",") if c.strip()] if isinstance(citations, str) else citations
-    r = MEM.remember(idx, os.path.abspath(repo), fact, cites, reason=reason)
+    r = MEM.remember(idx, os.path.abspath(repo), fact, cites, reason=reason, kind=kind)
     if r.get("stored"):
-        return f"✓ remembered, anchored to {', '.join(r['anchors'])}  ({r['n_memories']} memories stored)."
+        return f"✓ remembered ({r['kind']}), anchored to {', '.join(r['anchors'])}  ({r['n_memories']} memories stored)."
     return f"✗ not stored: {r['reason']}  (give a citation that resolves — a symbol name or file:line)"
+
+
+def expect_text(fact, citations, repo, reason=""):
+    """Capture an EXPECTATION (what you expected/intended) — the oracle side of `vard explain`."""
+    return remember_text(fact, citations, repo, reason=reason, kind="expectation")
+
+
+def explain_text(target, repo):
+    """The actual-vs-expected JOIN for a symbol/file/ticket — ACTUAL (observed) vs EXPECTED (your
+    corrections) with MECHANISM, CONFIG, DIVERGENCE, and UNCERTAINTY, every line provenance-tagged."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import memory as MEM
+    return MEM.explain(idx, os.path.abspath(repo), target)
 
 
 def recall_text(task, repo):
@@ -717,6 +733,14 @@ def main():
     prm = sub.add_parser("remember"); prm.add_argument("fact"); prm.add_argument("citations",
         help="comma-separated code anchors (symbol or file:line) the fact is about")
     prm.add_argument("repo", nargs="?", default="."); prm.add_argument("--reason", default="")
+    prm.add_argument("--kind", default="mechanism", choices=["mechanism", "expectation", "observation"],
+                     help="which side of the actual-vs-expected join this feeds")
+    pex = sub.add_parser("expect", help="capture an EXPECTATION (oracle side of `vard explain`)")
+    pex.add_argument("fact"); pex.add_argument("citations",
+        help="comma-separated code anchors the expectation is about")
+    pex.add_argument("repo", nargs="?", default="."); pex.add_argument("--reason", default="")
+    pxp = sub.add_parser("explain", help="actual-vs-expected JOIN for a symbol/file/ticket (provenance-tagged)")
+    pxp.add_argument("target"); pxp.add_argument("repo", nargs="?", default=".")
     prc = sub.add_parser("recall"); prc.add_argument("task"); prc.add_argument("repo", nargs="?", default=".")
     pcf = sub.add_parser("config"); pcf.add_argument("query"); pcf.add_argument("repo", nargs="?", default=".")
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
@@ -785,7 +809,11 @@ def _dispatch(a):
     elif a.cmd == "state-lineage":
         print(state_lineage_text(a.types, a.repo))
     elif a.cmd == "remember":
-        print(remember_text(a.fact, a.citations, a.repo, reason=a.reason))
+        print(remember_text(a.fact, a.citations, a.repo, reason=a.reason, kind=a.kind))
+    elif a.cmd == "expect":
+        print(expect_text(a.fact, a.citations, a.repo, reason=a.reason))
+    elif a.cmd == "explain":
+        print(explain_text(a.target, a.repo))
     elif a.cmd == "recall":
         print(recall_text(a.task, a.repo))
     elif a.cmd == "config":

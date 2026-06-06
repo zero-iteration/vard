@@ -123,6 +123,166 @@ def whole_picture(idx, repo, target, k=6):
     return "\n".join(out)
 
 
+def _resolve_region(idx, repo, target, mem):
+    """Resolve an explain target → (tfile, focal_syms, ticket). Accepts a symbol/file (like whole_picture)
+    or a ticket id (#123 / ABC-12) — for a ticket we pick the most-touched non-test code file it changed."""
+    rg = idx["rg"]
+    tm = _TICKET.search(target.strip())
+    ticket = (tm.group(1) and f"#{tm.group(1)}") or (tm.group(2) if tm else None) if tm else None
+    # a ticket target only counts if the whole target IS the ticket (avoid matching a number inside a name)
+    if ticket and target.strip().lstrip("#") in (ticket.lstrip("#"),):
+        scored = [(f, sum(1 for c in cs if ticket.lstrip("#") in {t.lstrip("#") for t in c["tickets"]}))
+                  for f, cs in mem["by_file"].items()]
+        scored = [(f, n) for f, n in scored if n and not _TEST.search(f)]
+        scored.sort(key=lambda x: -x[1])
+        if scored:
+            tfile = scored[0][0]
+            syms = [n for n in rg.nodes.values() if n.file == tfile and n.type in ("function", "method", "class")]
+            return tfile, syms, ticket
+    ticket = None
+    cands = [n for n in rg.nodes.values() if target in n.qual or target in n.file]
+    if not cands:
+        return None, [], None
+    cands.sort(key=lambda n: ((n.name or "") != target, bool(_TEST.search(n.file)), n.type != "class"))
+    tfile = cands[0].file
+    syms = [n for n in rg.nodes.values() if n.file == tfile and n.type in ("function", "method", "class")]
+    return tfile, syms, None
+
+
+def explain(idx, repo, target, k=8):
+    """The actual-vs-expected JOIN — VARD's confident answer. It never claims to find the bug; it makes the
+    DIVERGENCE undeniable by joining every leg and tagging each line with its provenance:
+
+      ACTUAL      — what we OBSERVED run (runtime overlay)            [confirmed-runtime]
+      MECHANISM   — the code + the commit/ticket that introduced it   [code] / [commit]
+      EXPECTED    — what you told us you expected (typed memory) + ticket text   [your expectation] / [ticket]
+      CONFIG      — the settings that steer it (file-values)          [config]
+      DIVERGENCE  — explicit, groundable conflicts                    [divergence]
+      UNCERTAINTY — what we could NOT confirm (never guessed)         [unverified]
+    """
+    rg = idx["rg"]
+    mem = mine_changes(repo)
+    tickets_map = _load_tickets(repo)
+    tfile, syms, ticket = _resolve_region(idx, repo, target, mem)
+    if not tfile:
+        return f"no symbol/file/ticket matches '{target}'. Try a class name, a file path fragment, or a ticket id."
+    focus_ids = {n.id for n in syms}
+    rt_conf = idx.get("rt_confirmed") or set()
+    rt_traced = idx.get("rt_traced") or set()        # ever-observed (ignores freshness)
+    rt_edges = idx.get("rt_edges") or []
+    has_runtime = bool(rt_conf or rt_traced)
+
+    hdr = f"# Explain: {target}"
+    if ticket:
+        hdr += f"  (ticket {ticket} → {tfile})"
+    out = [hdr, f"_actual-vs-expected for {tfile} — every line tagged with how we know it_\n"]
+
+    # ---------- ACTUAL (grounded): what we observed run ----------
+    out.append("## ACTUAL — what actually runs (observed)")
+    if not has_runtime:
+        out.append("  [unverified] no runtime trace for this repo — run `vard test -- <cmd>` to ground this leg.")
+    else:
+        confirmed_here = [n for n in syms if n.id in rt_conf]
+        stale_here = [n for n in syms if n.id in rt_traced and n.id not in rt_conf]
+        if confirmed_here:
+            for n in confirmed_here[:k]:
+                out.append(f"  [confirmed-runtime] {n.qual}  ({n.file}:{n.start}) — observed executing")
+        for n in stale_here[:k]:                      # observed in an earlier run, but the code changed since
+            out.append(f"  [stale-trace] {n.qual}  ({n.file}:{n.start}) — observed before, but its code "
+                       f"CHANGED since the trace; re-run `vard test`")
+        if not confirmed_here and not stale_here:
+            out.append("  [unverified] none of this file's methods were seen in the captured trace "
+                       "(not exercised by the tests, or a different path runs).")
+        edges = [(a, b, c) for a, b, c in rt_edges if a in focus_ids or b in focus_ids]
+        for a, b, c in edges[:k]:
+            out.append(f"  [confirmed-runtime] {rg.nodes[a].qual} → {rg.nodes[b].qual}  ({c}x) — real call observed")
+        # value-divergence hook (Tier 1b: instrumentation captures args/returns) — dormant until values exist
+        # for v in idx.get('rt_values', []): ...
+
+    # ---------- MECHANISM: the code + why it's coded this way ----------
+    out.append("\n## MECHANISM — the code, and why it's this way")
+    for n in syms[:k]:
+        out.append(f"  [code] {n.qual}  ({n.file}:{n.start}-{n.end})")
+    hist = mem["by_file"].get(tfile, [])
+    for c in hist[:k]:
+        tag = "INCIDENT/fix" if c["is_fix"] else "change"
+        tix = f" {','.join('#'+t.lstrip('#') for t in c['tickets'])}" if c["tickets"] else ""
+        out.append(f"  [commit {c['sha']}] {c['date']} ({tag}){tix}: {c['subject'][:80]}")
+        summ = next((tickets_map[t] for t in c["tickets"] if t in tickets_map), None)
+        if summ:
+            out.append(f"      ↳ [ticket] {summ[:120]}")
+
+    # ---------- EXPECTED: what you told us you expected (the oracle) ----------
+    out.append("\n## EXPECTED — what you expected (your corrections / intent)")
+    exp = recall(idx, repo, anchors=focus_ids, files={tfile}, query=target, limit=k, kinds={"expectation"})
+    if exp:
+        for m in exp:
+            flag = "" if m["status"] == "active" else "  ⚠(cited code changed since you said this)"
+            out.append(f"  [your expectation] {m['fact']}  [{', '.join(m['anchors'][:3])}]{flag}")
+    else:
+        out.append("  [unverified] no recorded expectation for this region — capture one with "
+                   "`vard expect \"<what you expected>\" <symbol>`.")
+    if ticket and tickets_map.get(ticket) or (ticket and tickets_map.get(ticket.lstrip("#"))):
+        out.append(f"  [ticket] {tickets_map.get(ticket) or tickets_map.get(ticket.lstrip('#'))}")
+
+    # ---------- CONFIG: settings that steer it ----------
+    cfg = idx.get("config") or {}
+    cfg_here = []                                          # (key, [ (value,file,line) ... ])
+    for key, v in cfg.items():
+        if set(v["readers"]) & focus_ids and v.get("defs"):
+            cfg_here.append((v["defs"][0]["key"], [(d["value"], d["file"], d["line"]) for d in v["defs"]]))
+    if cfg_here:
+        out.append("\n## CONFIG — settings this code reads (steers behavior, not in the code)")
+        for key, defs in cfg_here[:k]:
+            vals = "; ".join(f"{val} ({os.path.basename(f)}:{ln})" for val, f, ln in defs[:4])
+            out.append(f"  [config] {key} = {vals}")
+
+    # ---------- DIVERGENCE: groundable conflicts (the undeniable part) ----------
+    div = []
+    # D1 expected-but-not-observed: an expectation anchored to a method that did NOT run in the trace. Only
+    # fire for methods NEVER observed (untested / different path). Methods that WERE observed but went stale
+    # are a trace-freshness issue (surfaced as [stale-trace] above + D2), not a behavioral divergence.
+    if has_runtime:
+        for m in exp:
+            anchored_methods = [a for a in m.get("anchor_ids", [])
+                                if a in rg.nodes and rg.nodes[a].type in ("function", "method")]
+            never = [a for a in anchored_methods if a not in rt_conf and a not in rt_traced]
+            if never:
+                div.append(f"[divergence] you expect behavior at {rg.nodes[never[0]].qual}, but it was NEVER "
+                           f"observed running in the trace — either it's untested or a DIFFERENT path executes. "
+                           f"(expected: “{m['fact'][:80]}”)")
+    # D2 stale expectation: the code an expectation cites has changed since it was stated
+    for m in exp:
+        if m["status"] != "active":
+            div.append(f"[divergence] your expectation “{m['fact'][:70]}” cites code that CHANGED since — "
+                       f"it may no longer hold; re-confirm.")
+    # D3 config-profile ambiguity: a key this code reads has multiple defs with DIFFERENT values → which wins?
+    for key, defs in cfg_here:
+        distinct = {val for val, _, _ in defs}
+        if len(distinct) > 1:
+            div.append(f"[divergence] behavior depends on `{key}`, defined with conflicting values "
+                       f"({', '.join(sorted(distinct)[:4])}) across profiles — which one is live depends on the "
+                       f"active profile, which the trace does NOT capture. Verify the running profile.")
+    if div:
+        out.append("\n## DIVERGENCE — where ACTUAL and EXPECTED don't line up")
+        for d in div:
+            out.append("  " + d)
+
+    # ---------- UNCERTAINTY: state the gaps, never guess (anti-anchor) ----------
+    unc = []
+    if not has_runtime:
+        unc.append("the ACTUAL leg is ungrounded (no trace) — claims about what runs are unconfirmed.")
+    if cfg_here and not any(len({val for val, _, _ in defs}) > 1 for _, defs in cfg_here):
+        pass
+    if exp and not has_runtime:
+        unc.append("expectations are recorded but cannot be checked against a run — capture a trace to confirm them.")
+    if unc:
+        out.append("\n## UNCERTAINTY — what we could not confirm")
+        for u in unc:
+            out.append(f"  [unverified] {u}")
+    return "\n".join(out)
+
+
 # ============================================================================
 # Conversational memory — code-anchored, freshness-verified (the write path).
 # A memory is a fact bound to a code anchor (file::symbol). The JSON store is the
@@ -183,9 +343,23 @@ def _resolve_anchor(idx, citation):
     return None
 
 
-def remember(idx, repo, fact, citations, reason="", source="conversation"):
+# A fact's KIND decides which side of the actual-vs-expected join it feeds:
+#   mechanism   — WHY the code is the way it is (a decision/constraint/gotcha). Default.
+#   expectation — what the user EXPECTED / intended / corrected ("cheaper option should win"). The oracle.
+#   observation — something noted as seen happening (a manual runtime note; runtime.json is the automatic one).
+MEM_KINDS = ("mechanism", "expectation", "observation")
+
+
+def _entry_kind(entry):
+    k = entry.get("kind")
+    return k if k in MEM_KINDS else "mechanism"      # legacy/untyped facts read as mechanism
+
+
+def remember(idx, repo, fact, citations, reason="", source="conversation", kind="mechanism"):
     """Persist a fact, ANCHORED to code OR config. Anchor-or-drop: a fact with no resolvable citation is
-    refused (unanchorable claims can't be invalidated, so they're banned)."""
+    refused (unanchorable claims can't be invalidated, so they're banned). `kind` tags which side of the
+    join it feeds (mechanism / expectation / observation) — see MEM_KINDS."""
+    kind = kind if kind in MEM_KINDS else "mechanism"
     rg = idx["rg"]
     cites = [citations] if isinstance(citations, str) else list(citations or [])
     resolved = []
@@ -204,13 +378,15 @@ def remember(idx, repo, fact, citations, reason="", source="conversation"):
     if not resolved:
         return {"stored": False, "reason": "no citation resolved to code or config — fact refused (anchor-or-drop)"}
     entries = load_memories(repo)
-    # write-side adjudication: a new fact on the same anchor SUPERSEDES the old one
+    # write-side adjudication: a new fact on the same anchor SUPERSEDES the old one of the SAME KIND
+    # (an expectation doesn't clobber the mechanism on the same code, and vice-versa — they coexist).
     anchors = {r["anchor"] for r in resolved}
-    entries = [e for e in entries if not (anchors & {c["anchor"] for c in e.get("citations", [])})]
+    entries = [e for e in entries
+               if not (anchors & {c["anchor"] for c in e.get("citations", [])} and _entry_kind(e) == kind)]
     entries.append({"fact": fact.strip(), "reason": (reason or "").strip(),
-                    "citations": resolved, "source": source, "ts": int(time.time())})
+                    "citations": resolved, "source": source, "kind": kind, "ts": int(time.time())})
     _save_memories(repo, entries)
-    return {"stored": True, "anchors": sorted(anchors), "n_memories": len(entries)}
+    return {"stored": True, "anchors": sorted(anchors), "kind": kind, "n_memories": len(entries)}
 
 
 def _entry_status(idx, repo, entry):
@@ -224,9 +400,10 @@ def _entry_status(idx, repo, entry):
     return "stale" if "stale" in states or "gone" in states else "active"
 
 
-def recall(idx, repo, anchors=None, files=None, query="", limit=6):
+def recall(idx, repo, anchors=None, files=None, query="", limit=6, kinds=None):
     """Fresh, relevant memories. Primary match = anchor/file overlap with the current context; embedding
-    similarity over the fact text is the fallback. Drops 'gone' memories; flags 'stale' ones for re-check."""
+    similarity over the fact text is the fallback. Drops 'gone' memories; flags 'stale' ones for re-check.
+    `kinds` optionally restricts to a set of MEM_KINDS (e.g. {'expectation'} for the EXPECTED leg)."""
     rg = idx["rg"]
     entries = load_memories(repo)
     if not entries:
@@ -234,6 +411,8 @@ def recall(idx, repo, anchors=None, files=None, query="", limit=6):
     anchors = set(anchors or []); files = set(files or [])
     scored = []
     for e in entries:
+        if kinds and _entry_kind(e) not in kinds:
+            continue
         st = _entry_status(idx, repo, e)
         if st == "gone":
             continue
@@ -256,8 +435,9 @@ def recall(idx, repo, anchors=None, files=None, query="", limit=6):
             out = []
     else:
         out = []
-    return [{"fact": e["fact"], "reason": e["reason"], "status": st,
-             "anchors": [c["name"] for c in e["citations"]], "ts": e["ts"]} for st, e in out[:limit]]
+    return [{"fact": e["fact"], "reason": e["reason"], "status": st, "kind": _entry_kind(e),
+             "anchors": [c["name"] for c in e["citations"]],
+             "anchor_ids": [c["anchor"] for c in e["citations"]], "ts": e["ts"]} for st, e in out[:limit]]
 
 
 def recall_text(idx, repo, anchors=None, files=None, query="", limit=6):
@@ -270,5 +450,6 @@ def recall_text(idx, repo, anchors=None, files=None, query="", limit=6):
         flag = "✓" if m["status"] == "active" else "⚠ cited code CHANGED since — re-check"
         anch = ", ".join(m["anchors"][:3])
         why = f" — {m['reason']}" if m["reason"] else ""
-        lines.append(f"  {flag}  {m['fact']}{why}  [{anch}]")
+        kind = f"{m['kind']}: " if m.get("kind") and m["kind"] != "mechanism" else ""
+        lines.append(f"  {flag}  {kind}{m['fact']}{why}  [{anch}]")
     return "\n".join(lines)

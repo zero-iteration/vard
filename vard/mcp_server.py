@@ -124,15 +124,48 @@ def vard_config(query: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
-def vard_remember(fact: str, citations: str, repo: str, reason: str = "") -> str:
+def vard_remember(fact: str, citations: str, repo: str, reason: str = "", kind: str = "mechanism") -> str:
     """Persist a durable fact about this repo that is NOT in the code — a decision, constraint, gotcha,
     or correction the user told you (e.g. "this cache is the source of truth, not the DB"; "never call X
     directly, it skips validation"). `citations` = comma-separated code anchors the fact is about (a
     symbol like "RedisCacheManager.createConfig" or a "file.py:line"). The fact is ANCHORED to that code
     and auto-invalidated when that code changes, so it can't silently go stale. A fact with no resolvable
-    citation is refused (unanchorable claims can't be verified). Call this when the user states something
-    durable about how/why the code works that future sessions should not have to be re-told."""
-    return cli.remember_text(fact, citations, repo, reason=reason)
+    citation is refused (unanchorable claims can't be verified). `kind` ∈ {mechanism, expectation,
+    observation}: mechanism = WHY it's coded this way (default); expectation = what the user EXPECTED/intended
+    (use vard_expect); observation = something noted as seen. The kind decides which side of the
+    actual-vs-expected join (vard_explain) the fact feeds. Call this when the user states something durable
+    about how/why the code works that future sessions should not have to be re-told."""
+    return cli.remember_text(fact, citations, repo, reason=reason, kind=kind)
+
+
+@mcp.tool()
+@_safe
+def vard_expect(expectation: str, citations: str, repo: str, reason: str = "") -> str:
+    """Record what the user EXPECTED the code to do — the oracle side of vard_explain. Use this whenever the
+    user states intended behavior or corrects an assumption ("the cheaper option should win"; "after an edit
+    the user must still be able to log in"). `citations` = the code anchors it's about. vard_explain then
+    contrasts this EXPECTED behavior against what ACTUALLY runs (the runtime overlay) and flags the divergence
+    — e.g. "you expected X at method M, but M was never observed running." Anchored + freshness-checked like
+    any memory, so a changed code path flags the expectation as needing re-confirmation."""
+    return cli.expect_text(expectation, citations, repo, reason=reason)
+
+
+@mcp.tool()
+@_safe
+def vard_explain(target: str, repo: str) -> str:
+    """THE confident answer: how the code ACTUALLY runs vs what you EXPECTED, with the divergence made
+    explicit. Given a symbol, file, or ticket id, returns one joined, provenance-tagged answer:
+      ACTUAL      — methods/edges OBSERVED running (the runtime overlay from `vard test`)  [confirmed-runtime]
+      MECHANISM   — the code + the commit/ticket that introduced it                        [code]/[commit]
+      EXPECTED    — what the user told us to expect (vard_expect) + ticket text             [your expectation]
+      CONFIG      — the settings that steer it (file-values across profiles)               [config]
+      DIVERGENCE  — explicit conflicts (expected-but-not-observed, stale expectation,
+                    config-profile ambiguity)                                              [divergence]
+      UNCERTAINTY — what could NOT be confirmed (never guessed)                            [unverified]
+    It never claims to find the bug; it makes the actual-vs-expected divergence undeniable, with every claim
+    tagged by how it's known. Use for "why does X behave this way / why is the prod behavior wrong" questions,
+    especially after `vard test` has grounded the ACTUAL leg."""
+    return cli.explain_text(target, repo)
 
 
 @mcp.tool()

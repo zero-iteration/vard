@@ -119,17 +119,25 @@ def call_edges(idx, repo, fresh_only=True):
     return out
 
 
+def traced_anchors(idx, repo):
+    """Every method anchor present in the trace, REGARDLESS of freshness — i.e. 'was ever observed running'.
+    Lets the join tell 'observed but the code changed since' (stale) apart from 'never observed' (untested)."""
+    rg = idx["rg"]
+    return {m["anchor"] for m in load(repo).get("methods", []) if m["anchor"] in rg.nodes}
+
+
 def attach(idx, repo):
-    """Compute the freshness-checked runtime overlay once and stash it on idx for rank/impact/context.
-    No-op cost when there's no trace. Sets idx['rt_confirmed'] (set of node ids) and idx['rt_edges']
-    (list of (caller, callee, n) among confirmed nodes)."""
+    """Compute the freshness-checked runtime overlay once and stash it on idx for rank/impact/context/explain.
+    No-op cost when there's no trace. Sets idx['rt_confirmed'] (fresh, observed node ids), idx['rt_edges']
+    (edges among confirmed nodes), and idx['rt_traced'] (ever-observed anchors, ignoring freshness)."""
     if "rt_confirmed" in idx:                        # already attached this load
         return idx
     try:
         conf = confirmed_nodes(idx, repo)
         idx["rt_confirmed"] = conf
+        idx["rt_traced"] = traced_anchors(idx, repo)
         idx["rt_edges"] = [e for e in call_edges(idx, repo, fresh_only=False)
                            if e[0] in conf and e[1] in conf]
     except Exception:
-        idx["rt_confirmed"] = set(); idx["rt_edges"] = []
+        idx["rt_confirmed"] = set(); idx["rt_traced"] = set(); idx["rt_edges"] = []
     return idx
