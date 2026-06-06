@@ -671,8 +671,7 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2"):
     jarp = _agent_jar(jar)
     if not jarp:
         return ("vard test: agent jar not found. Build it:\n"
-                "  cd vard-agent && javac -d build src/VardAgent.java && "
-                "jar cfm vard-agent.jar manifest.txt -C build VardAgent.class\n"
+                "  bash vard-agent/build.sh        # targets JDK 11 bytecode (loads on 11 and 17)\n"
                 "  (or pass --jar <path>)")
     print("→ vard: ensuring the index is fresh before the run...", file=sys.stderr)
     idx = fresh_index(repo)
