@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build the VARD JVM agent. Target JDK 11 bytecode (major 55) so the jar LOADS on the target repo's JVM
-# whether it runs JDK 11 or 17 — building with a newer javac default (e.g. 17→major 61) makes it fail to
-# load on JDK 11 repos. ProcessHandle (used for per-PID trace files) is a Java 9+ API, so 11 is the floor.
-# JDK 8 support would need the multi-release treatment (ProcessHandle via reflection) — not yet.
+# Build the VARD instrumentation agent: a ByteBuddy-shaded -javaagent jar.
+# Targets JDK 11 bytecode (pom maven.compiler.release=11) so it LOADS on JDK 11 and 17 repos.
+# ProcessHandle (per-PID trace files) is Java 9+, so 11 is the floor.
+# Produces target/vard-agent.jar; copied to vard-agent/vard-agent.jar where the CLI looks for it.
+#
+# Falls back to the zero-dep stack-sampler (sampler-VardSampler.java.txt) only if you can't run Maven.
 set -euo pipefail
 cd "$(dirname "$0")"
-rm -rf build && mkdir build
-javac --release 11 -d build src/VardAgent.java
-jar cfm vard-agent.jar manifest.txt -C build VardAgent.class
-echo "✓ built vard-agent.jar (JDK 11 bytecode)"
+mvn -q -DskipTests package
+cp -f target/vard-agent.jar vard-agent.jar
+echo "✓ built vard-agent.jar (ByteBuddy-shaded, JDK 11 bytecode)"

@@ -170,6 +170,8 @@ def explain(idx, repo, target, k=8):
     rt_conf = idx.get("rt_confirmed") or set()
     rt_traced = idx.get("rt_traced") or set()        # ever-observed (ignores freshness)
     rt_edges = idx.get("rt_edges") or []
+    rt_values = idx.get("rt_values") or {}           # anchor -> [{v: "(args) => ret", n}] (instrumentation)
+    rt_config = idx.get("rt_config") or {}
     has_runtime = bool(rt_conf or rt_traced)
 
     hdr = f"# Explain: {target}"
@@ -177,16 +179,21 @@ def explain(idx, repo, target, k=8):
         hdr += f"  (ticket {ticket} → {tfile})"
     out = [hdr, f"_actual-vs-expected for {tfile} — every line tagged with how we know it_\n"]
 
-    # ---------- ACTUAL (grounded): what we observed run ----------
-    out.append("## ACTUAL — what actually runs (observed)")
+    # ---------- ACTUAL (grounded): what we observed run, with the real values ----------
+    prof = rt_config.get("profile")
+    mode = rt_config.get("mode")
+    fp = (f" — confirmed under profile={prof}" if prof else
+          (" — profile not captured; can't tell test-path from prod-path" if has_runtime and mode != "instrument" else ""))
+    out.append(f"## ACTUAL — what actually runs (observed{fp})")
     if not has_runtime:
         out.append("  [unverified] no runtime trace for this repo — run `vard test -- <cmd>` to ground this leg.")
     else:
         confirmed_here = [n for n in syms if n.id in rt_conf]
         stale_here = [n for n in syms if n.id in rt_traced and n.id not in rt_conf]
-        if confirmed_here:
-            for n in confirmed_here[:k]:
-                out.append(f"  [confirmed-runtime] {n.qual}  ({n.file}:{n.start}) — observed executing")
+        for n in confirmed_here[:k]:
+            out.append(f"  [confirmed-runtime] {n.qual}  ({n.file}:{n.start}) — observed executing")
+            for s in (rt_values.get(n.id) or [])[:4]:    # the agent-uncatchable fact: real args ⇒ real return
+                out.append(f"      [observed-value] {n.name}{s['v']}   ({s['n']}x)")
         for n in stale_here[:k]:                      # observed in an earlier run, but the code changed since
             out.append(f"  [stale-trace] {n.qual}  ({n.file}:{n.start}) — observed before, but its code "
                        f"CHANGED since the trace; re-run `vard test`")
@@ -196,8 +203,6 @@ def explain(idx, repo, target, k=8):
         edges = [(a, b, c) for a, b, c in rt_edges if a in focus_ids or b in focus_ids]
         for a, b, c in edges[:k]:
             out.append(f"  [confirmed-runtime] {rg.nodes[a].qual} → {rg.nodes[b].qual}  ({c}x) — real call observed")
-        # value-divergence hook (Tier 1b: instrumentation captures args/returns) — dormant until values exist
-        # for v in idx.get('rt_values', []): ...
 
     # ---------- MECHANISM: the code + why it's coded this way ----------
     out.append("\n## MECHANISM — the code, and why it's this way")
@@ -256,6 +261,19 @@ def explain(idx, repo, target, k=8):
         if m["status"] != "active":
             div.append(f"[divergence] your expectation “{m['fact'][:70]}” cites code that CHANGED since — "
                        f"it may no longer hold; re-confirm.")
+    # D4 value juxtaposition: an expectation anchored to a method we OBSERVED returning concrete values.
+    # We don't parse the expectation (no fragile NLP) — we put the expected claim next to the REAL observed
+    # values so the contradiction (if any) is undeniable and the agent adjudicates. This is the killer leg:
+    # "you expected X; it actually returned these numbers."
+    for m in exp:
+        if m["status"] != "active":
+            continue
+        for a in m.get("anchor_ids", []):
+            obs = rt_values.get(a)
+            if obs:
+                vs = "; ".join(s["v"] for s in obs[:3])
+                div.append(f"[divergence-check] you expect “{m['fact'][:70]}” at {rg.nodes[a].qual}; it was "
+                           f"OBSERVED returning: {vs} — confirm the numbers actually agree with that.")
     # D3 config-profile ambiguity: a key this code reads has multiple defs with DIFFERENT values → which wins?
     for key, defs in cfg_here:
         distinct = {val for val, _, _ in defs}

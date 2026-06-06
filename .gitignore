@@ -22,3 +22,9 @@ __pycache__/
 VARD_REPORT.pdf
 VARD_REPORT.md
 VARD_REPORT.html
+
+# JVM agent: ship source + pom + build.sh; the shaded jar (4MB, bundles ByteBuddy) is a build
+# artifact rebuilt via `bash vard-agent/build.sh` — don't churn git history with it.
+vard-agent/target/
+vard-agent/vard-agent.jar
+vard-agent/dependency-reduced-pom.xml
