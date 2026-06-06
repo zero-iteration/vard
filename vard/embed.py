@@ -82,7 +82,16 @@ def _embed_st(texts, batch=64):
                                  show_progress_bar=False), dtype=np.float32)
 
 
+def embeddings_disabled():
+    return _MODEL_NAME.strip().lower() in ("none", "off", "")
+
+
 def embed_texts(texts):
+    # VARD_EMB_MODEL=none means embedding-free (BM25 + graph only). Fail fast and LOCALLY — never construct
+    # SentenceTransformer("none"), which would fire a (failing) HuggingFace network call. Callers that don't
+    # pre-check the env (e.g. memory.recall's fallback) catch this and degrade cleanly.
+    if embeddings_disabled():
+        raise RuntimeError("embeddings disabled (VARD_EMB_MODEL=none) — BM25/graph only")
     if not texts:
         return np.zeros((0, 8), dtype=np.float32)
     return _embed_openai(texts) if _is_openai() else _embed_st(texts)

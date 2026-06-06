@@ -74,7 +74,7 @@ public class VardAgent {
             Thread t = new Thread(() -> {
                 while (true) {
                     try { Thread.sleep(flushSecs * 1000L); } catch (InterruptedException e) { return; }
-                    Collector.dump(out);
+                    Collector.dump(out, false);              // quiet: a line every flush would spam the server log
                 }
             });
             t.setDaemon(true);
@@ -196,14 +196,17 @@ public class VardAgent {
             return b.append(")").toString();
         }
 
-        static void dump(String out) {
+        static void dump(String out) { dump(out, true); }
+
+        static void dump(String out, boolean announce) {
             if (methods.isEmpty() && edges.isEmpty()) return;     // a JVM that ran no app code
             try {
                 long pid;
                 try { pid = ProcessHandle.current().pid(); } catch (Throwable t) { pid = System.nanoTime(); }
                 File f = new File(out + "." + pid);
-                if (f.getParentFile() != null) f.getParentFile().mkdirs();
-                try (PrintWriter w = new PrintWriter(new FileWriter(f))) {
+                File tmp = new File(out + "." + pid + ".tmp");    // write tmp + atomic rename so a concurrent
+                if (f.getParentFile() != null) f.getParentFile().mkdirs();  // reader (live-attach flush) never
+                try (PrintWriter w = new PrintWriter(new FileWriter(tmp))) {  // sees a half-written file
                     String prof = firstNonEmpty(System.getProperty("spring.profiles.active"),
                                                 System.getenv("SPRING_PROFILES_ACTIVE"));
                     w.println("{\"t\":\"config\",\"profile\":\"" + esc(prof == null ? "" : prof)
@@ -226,9 +229,17 @@ public class VardAgent {
                         w.println(b.append("]}").toString());
                     }
                 }
-                System.err.println("[vard-agent] wrote runtime trace: " + out + "." + pid
-                                   + " (" + methods.size() + " methods, " + edges.size() + " edges, "
-                                   + values.size() + " valued)");
+                try {
+                    java.nio.file.Files.move(tmp.toPath(), f.toPath(),
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (Throwable mv) {                          // ATOMIC_MOVE unsupported → best-effort rename
+                    if (!tmp.renameTo(f)) tmp.delete();
+                }
+                if (announce)
+                    System.err.println("[vard-agent] wrote runtime trace: " + out + "." + pid
+                                       + " (" + methods.size() + " methods, " + edges.size() + " edges, "
+                                       + values.size() + " valued)");
             } catch (Throwable ex) { System.err.println("[vard-agent] dump failed: " + ex); }
         }
 

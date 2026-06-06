@@ -677,6 +677,10 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None):
     idx = fresh_index(repo)
     if not idx:
         return f"No index. Run: vard init {repo}"
+    if not any(n.file.endswith(".java") for n in idx["rg"].nodes.values()):
+        return ("vard test: the runtime layer is JVM-only right now (the agent attaches to a JVM). This repo "
+                "has no .java sources, so nothing will be traced. The static layers (context/impact/couplings/"
+                "config) work without it.")
     if pkgs is None:
         pkgs = ",".join(_derive_java_pkgs(idx, repo))
     cmd = command or ["mvn", "test"]
@@ -708,7 +712,8 @@ def _ingest_traces(idx, repo, tracedir, env, header, clean):
     `vard test` and `vard attach`."""
     import glob
     from . import runtime as RT
-    traces = sorted(glob.glob(os.path.join(tracedir, "run.jsonl.*")))
+    # exclude *.tmp — the agent writes a temp file then atomically renames; a .tmp is a half-written snapshot
+    traces = sorted(t for t in glob.glob(os.path.join(tracedir, "run.jsonl.*")) if not t.endswith(".tmp"))
     if not traces:
         return (header + "no trace captured. The target JVM may not have honored the agent, or no app "
                 "classes (pkgs filter) executed.")
@@ -741,6 +746,8 @@ def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5
     idx = fresh_index(repo)
     if not idx:
         return f"No index. Run: vard init {repo}"
+    if not any(n.file.endswith(".java") for n in idx["rg"].nodes.values()):
+        return "vard attach: the runtime agent is JVM-only; this repo has no .java sources to trace."
     if pkgs is None:
         pkgs = ",".join(_derive_java_pkgs(idx, repo))
     tracedir = os.path.join(os.path.abspath(repo), VDIR, "trace")

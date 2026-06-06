@@ -192,11 +192,11 @@ def explain(idx, repo, target, k=8):
     else:
         runfp = " — no run captured" if not has_runtime else " — env not captured"
     out.append(f"## ACTUAL — what actually runs (observed{runfp})")
+    confirmed_here = [n for n in syms if n.id in rt_conf]   # defined unconditionally (UNCERTAINTY reads it)
+    stale_here = [n for n in syms if n.id in rt_traced and n.id not in rt_conf]
     if not has_runtime:
         out.append("  [unverified] no runtime trace for this repo — run `vard test -- <cmd>` (or `vard attach <pid>`) to ground this leg.")
     else:
-        confirmed_here = [n for n in syms if n.id in rt_conf]
-        stale_here = [n for n in syms if n.id in rt_traced and n.id not in rt_conf]
         for n in confirmed_here[:k]:
             envs = rt_method_envs.get(n.id, {})
             envlbl = f"  [under {', '.join(sorted(envs))}]" if envs else ""
@@ -240,7 +240,6 @@ def explain(idx, repo, target, k=8):
         out.append(f"  [ticket] {tickets_map.get(ticket) or tickets_map.get(ticket.lstrip('#'))}")
 
     # ---------- CONFIG: settings that steer it (file value AND the value observed live) ----------
-    from . import config_index as _CFG
     cfg = idx.get("config") or {}
     rt_cfgvals = idx.get("rt_config_values") or {}        # norm_key -> {value, n, envs} observed at runtime
     cfg_here = []                                          # (display_key, norm_key, [(value,file,line)...])

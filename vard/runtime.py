@@ -70,18 +70,22 @@ def ingest(idx, repo, trace_path, env=None):
         lines = [l.strip() for l in open(trace_path, encoding="utf-8", errors="ignore") if l.strip()]
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
+    def _loads(s):
+        try:
+            o = json.loads(s)
+            return o if isinstance(o, dict) else None
+        except Exception:
+            return None
     # resolve the effective env BEFORE tagging observations (the config record carries env+profile+mode)
-    cfg = next((json.loads(l) for l in lines if '"t":"config"' in l.replace(" ", "")), {})
-    try:
-        cfg = cfg if isinstance(cfg, dict) else {}
-    except Exception:
-        cfg = {}
-    eff_env = (env or cfg.get("env") or cfg.get("profile") or "default").strip() or "default"
+    cfg = next((c for c in (_loads(l) for l in lines if '"t":"config"' in l.replace(" ", "")) if c), {})
+    eff_env = (str(env or cfg.get("env") or cfg.get("profile") or "default")).strip() or "default"
     runs[eff_env] = {"profile": cfg.get("profile", ""), "mode": cfg.get("mode", "sample")}
     unresolved = 0
     try:
         for line in lines:
-            o = json.loads(line)
+            o = _loads(line)                                 # one malformed line must not drop the whole trace
+            if o is None:
+                continue
             t = o.get("t")
             if t == "method":
                 nid = _resolve_qual(q2i, o["qual"])
