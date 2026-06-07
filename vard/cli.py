@@ -662,7 +662,7 @@ def _derive_java_pkgs(idx, repo):
     return sorted(prefixes)
 
 
-def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None):
+def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None, debug=False):
     """`vard test -- <cmd>`: run the dev's existing test command (default `mvn test`) under the VARD java
     agent, then merge the ground-truth trace (what actually executed + real call edges) into the runtime
     overlay. The dev runs the tests; VARD only listens — no app to stand up, it just needs to compile."""
@@ -695,7 +695,7 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None):
     # JAVA_TOOL_OPTIONS reaches EVERY JVM the build spawns — including the JVM Surefire forks for the actual
     # tests (which -javaagent via MAVEN_OPTS would miss). The agent writes one per-PID file per JVM.
     jto = (f"-javaagent:{jarp} -Dvard.out={outbase} -Dvard.ms={ms} -Dvard.env={runenv}"
-           + (f" -Dvard.pkgs={pkgs}" if pkgs else ""))
+           + (f" -Dvard.pkgs={pkgs}" if pkgs else "") + (" -Dvard.debug=1" if debug else ""))
     jenv = dict(os.environ)
     jenv["JAVA_TOOL_OPTIONS"] = (jenv.get("JAVA_TOOL_OPTIONS", "") + " " + jto).strip()
     print(f"→ vard: running `{' '.join(cmd)}` under the agent (env={runenv}, pkgs: {pkgs or 'all app classes'})...", file=sys.stderr)
@@ -747,7 +747,7 @@ def _ingest_traces(idx, repo, tracedir, env, label, rc, clean):
     return out
 
 
-def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5):
+def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5, debug=False):
     """`vard attach <pid>`: load the agent into an ALREADY-RUNNING JVM (no restart), let it run for `for_secs`
     while you exercise it (the agent flushes a trace every `flush`s), then merge what it observed under `env`.
     The way to ground ACTUAL against a live local/staging server, not just the test suite."""
@@ -770,7 +770,7 @@ def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5
     os.makedirs(tracedir, exist_ok=True)
     outbase = os.path.join(tracedir, "run.jsonl")
     # agentmain can't read -D on a running JVM, so options ride in the loadAgent args string (k=v;...)
-    agent_args = f"out={outbase};values=*;env={env};flush={flush}" + (f";pkgs={pkgs}" if pkgs else "")
+    agent_args = f"out={outbase};values=*;env={env};flush={flush}" + (f";pkgs={pkgs}" if pkgs else "") + (";debug=1" if debug else "")
     java = os.path.join(os.environ["JAVA_HOME"], "bin", "java") if os.environ.get("JAVA_HOME") else "java"
     print(f"→ vard: attaching agent to pid {pid} (env={env}, flush={flush}s)...", file=sys.stderr)
     try:
@@ -827,6 +827,7 @@ def main():
     ptt.add_argument("--pkgs", default=None, help="comma class-prefixes to trace (default: auto from repo)")
     ptt.add_argument("--ms", default="2", help="stack-sampling interval (ms; sampler fallback only)")
     ptt.add_argument("--env", default="test", help="provenance label for this run (e.g. test, local, staging)")
+    ptt.add_argument("--debug", action="store_true", help="log every class the agent instruments + transform errors")
     ptt.add_argument("command", nargs=argparse.REMAINDER, help="command after -- (default: mvn test)")
     pat = sub.add_parser("attach", help="attach the agent to an ALREADY-RUNNING JVM (no restart) + observe")
     pat.add_argument("pid", help="target JVM process id (same user)")
@@ -835,6 +836,7 @@ def main():
     pat.add_argument("--env", default="local", help="provenance label (e.g. local, staging, prod)")
     pat.add_argument("--for", dest="for_secs", type=int, default=30, help="seconds to observe before merging")
     pat.add_argument("--flush", type=int, default=5, help="agent trace-flush interval (seconds)")
+    pat.add_argument("--debug", action="store_true", help="log every class the agent instruments + transform errors")
     pru = sub.add_parser("rules", help="print (or --write) agent routing rules for CLAUDE.md / AGENTS.md")
     pru.add_argument("repo", nargs="?", default="."); pru.add_argument("--write", action="store_true")
     pru.add_argument("--file", default=None, help="target file (default: existing CLAUDE.md/AGENTS.md, else CLAUDE.md)")
@@ -908,9 +910,9 @@ def _dispatch(a):
         print(uninstall_hook("global" if a.glob else "project", a.repo))
     elif a.cmd == "test":
         cmd = [c for c in (a.command or []) if c != "--"]
-        print(run_test(a.repo, cmd, jar=a.jar, pkgs=a.pkgs, ms=a.ms, env=a.env))
+        print(run_test(a.repo, cmd, jar=a.jar, pkgs=a.pkgs, ms=a.ms, env=a.env, debug=a.debug))
     elif a.cmd == "attach":
-        print(attach_run(a.pid, a.repo, jar=a.jar, pkgs=a.pkgs, env=a.env, for_secs=a.for_secs, flush=a.flush))
+        print(attach_run(a.pid, a.repo, jar=a.jar, pkgs=a.pkgs, env=a.env, for_secs=a.for_secs, flush=a.flush, debug=a.debug))
     elif a.cmd == "learn":
         idx = fresh_index(a.repo)
         if not idx:

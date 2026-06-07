@@ -41,6 +41,7 @@ public class VardAgent {
         Collector.configure(opt(a, "values", "*"), Integer.parseInt(opt(a, "maxsamples", "8")),
                             opt(a, "env", ""));
         final int flushSecs = Integer.parseInt(opt(a, "flush", "0"));   // >0 → periodic snapshot (live attach)
+        final boolean debug = !opt(a, "debug", "").isEmpty();           // vard.debug=1 → log every instrumented class
 
         net.bytebuddy.matcher.ElementMatcher.Junction<net.bytebuddy.description.type.TypeDescription> typeM =
                 not(nameStartsWith("vard.")).and(not(nameStartsWith("vard.shaded.")))
@@ -59,8 +60,9 @@ public class VardAgent {
                 // ALREADY-LOADED classes requires. Essential for live attach (agentmain), harmless for premain.
                 .disableClassFormatChanges()
                 .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
-                // default redefinition listener ignores per-class transform failures — on a real app some
-                // classes (proxies, generated) legitimately can't be instrumented; one failure must not abort.
+                // surface (don't escalate) per-class transform failures — a class that silently fails to
+                // instrument explains "method X never confirmed"; vard.debug=1 also logs every success.
+                .with(new Diag(debug))
                 .ignore(nameStartsWith("vard.").or(nameStartsWith("net.bytebuddy.")))
                 .type(typeM)
                 .transform((builder, td, cl, mod, pd) -> builder.visit(
@@ -98,6 +100,23 @@ public class VardAgent {
     private static String opt(Map<String, String> a, String key, String def) {
         if (a.containsKey(key)) return a.get(key);
         return System.getProperty("vard." + key, def);
+    }
+
+    /** Transform diagnostics: ALWAYS report a class that failed to instrument (explains a never-confirmed
+     *  method); with vard.debug=1 also list every class successfully instrumented (so you can confirm your
+     *  target class — and thus its private methods — was transformed). */
+    static class Diag extends AgentBuilder.Listener.Adapter {
+        final boolean verbose;
+        Diag(boolean v) { verbose = v; }
+        @Override public void onTransformation(net.bytebuddy.description.type.TypeDescription td,
+                ClassLoader cl, net.bytebuddy.utility.JavaModule m, boolean loaded,
+                net.bytebuddy.dynamic.DynamicType dt) {
+            if (verbose) System.err.println("[vard-agent] instrumented " + td.getName());
+        }
+        @Override public void onError(String typeName, ClassLoader cl, net.bytebuddy.utility.JavaModule m,
+                boolean loaded, Throwable t) {
+            System.err.println("[vard-agent] WARN could not instrument " + typeName + " — " + t);
+        }
     }
 
     /** Inlined into every instrumented method. Keep tiny; all real work is in Collector (never throws out). */
