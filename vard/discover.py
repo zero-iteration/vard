@@ -90,7 +90,8 @@ def save_ruleset(repo, rules):
         merged[k] = sorted(set(DEFAULT_RULESET[k]) | set(v if isinstance(v, list) else []))
     out_path = os.path.join(repo, ".vard", "ruleset.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    json.dump(merged, open(out_path, "w"), indent=2)
+    with open(out_path, "w") as _o:
+        json.dump(merged, _o, indent=2)
     return merged
 
 
@@ -100,7 +101,8 @@ def discover(repo, use_cache=True, llm=None):
          OPENAI_API_KEY if available, else fall back to DEFAULT_RULESET (works offline)."""
     out_path = os.path.join(repo, ".vard", "ruleset.json")
     if use_cache and os.path.isfile(out_path):
-        return json.load(open(out_path))
+        with open(out_path) as _f:
+            return json.load(_f)
     rules = {}
     if llm is not None:                                   # agent-driven discovery (explicit)
         try:

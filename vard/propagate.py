@@ -41,7 +41,8 @@ def _py_targets(f, dots, module, names, mod2file, fileset):
 
 def _read(repo, rel, n=6000):
     try:
-        return open(os.path.join(repo, rel), encoding="utf-8", errors="ignore").read()[:n]
+        with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as _f:
+            return _f.read()[:n]
     except Exception:
         return ""
 

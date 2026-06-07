@@ -140,6 +140,46 @@ class RuntimeIngestTest(unittest.TestCase):
         self.assertIn("Service.compute", traced)                   # but still known to have run before
 
 
+class MutationCoverageTest(unittest.TestCase):
+    def setUp(self):
+        self.root = _mk_repo()
+
+    def test_field_mutation_before_after_and_coverage(self):
+        idx = cli.load_index(self.root)
+        # synthetic trace: compute executed; a setter mutation; an instrumented-but-unrun class
+        RT.ingest(idx, self.root, _trace(self.root, [
+            {"t": "config", "env": "prod"},
+            {"t": "class", "name": "Service"},
+            {"t": "method", "qual": "Service.compute", "hits": 1},
+            {"t": "mutation", "node": "Service.compute", "kind": "field", "target": "Conf.mode",
+             "op": "write", "before": "A", "after": "B", "n": 1},
+        ]), env="prod")
+        data = RT.load(self.root)
+        self.assertEqual(len(data["mutations"]), 1)
+        mu = data["mutations"][0]
+        self.assertEqual((mu["before"], mu["after"]), ("A", "B"))
+        self.assertIn("Service", data["instrumented_classes"])
+        # coverage: compute executed; refund instrumented(Service)-but-never-ran
+        idx2 = cli.fresh_index(self.root)
+        cw = {n.id: n for n in idx2["rg"].nodes.values()}
+        cid = next(i for i, n in cw.items() if n.qual == "Service.compute")
+        rid = next(i for i, n in cw.items() if n.qual == "Service.refund")
+        self.assertEqual(RT.coverage(idx2, self.root, cid)["status"], "executed")
+        self.assertEqual(RT.coverage(idx2, self.root, rid)["status"], "instrumented")
+
+    def test_mutation_writer_node_freshness(self):
+        idx = cli.load_index(self.root)
+        RT.ingest(idx, self.root, _trace(self.root, [
+            {"t": "config", "env": "prod"},
+            {"t": "method", "qual": "Service.compute", "hits": 1},
+            {"t": "mutation", "node": "Service.compute", "kind": "field", "target": "x.y",
+             "op": "write", "after": "v", "n": 1},
+        ]), env="prod")
+        self.assertEqual(len(cli.fresh_index(self.root)["rt_mutations"]), 1)
+        _write(self.root, "pkg/svc.py", SVC.replace("return n * 2", "return n * 9"))  # writer changed
+        self.assertEqual(len(cli.fresh_index(self.root)["rt_mutations"]), 0)           # stale → dropped
+
+
 class MemoryTest(unittest.TestCase):
     def setUp(self):
         self.root = _mk_repo()
@@ -171,6 +211,20 @@ class MemoryTest(unittest.TestCase):
     def test_unanchorable_fact_refused(self):
         r = MEM.remember(self.idx, self.root, "a floating claim", ["no_such_symbol_xyz"])
         self.assertFalse(r["stored"])                              # anchor-or-drop
+
+    def test_recall_no_embed_fallback_never_loads_model(self):
+        # a memory with NO anchor/file overlap would normally hit the embedding fallback; with
+        # embed_fallback=False it must return [] WITHOUT importing/calling embeddings (explain's path).
+        MEM.remember(self.idx, self.root, "unrelated fact", ["Service.compute"])
+        import vard.embed as E
+        orig = E.embed_texts
+        E.embed_texts = lambda *a, **k: (_ for _ in ()).throw(AssertionError("embeddings must NOT load"))
+        try:
+            out = MEM.recall(self.idx, self.root, anchors=set(), files=set(),
+                             query="something with no anchor overlap", embed_fallback=False)
+            self.assertEqual(out, [])
+        finally:
+            E.embed_texts = orig
 
 
 class RankInvariantTest(unittest.TestCase):

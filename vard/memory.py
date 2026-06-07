@@ -22,7 +22,10 @@ def _load_tickets(repo):
     to enrich the 'why' with the business symptom behind each [TF-XXXX], not just the terse commit."""
     p = os.path.join(repo, ".vard", "tickets.json")
     try:
-        return json.load(open(p)) if os.path.isfile(p) else {}
+        if not os.path.isfile(p):
+            return {}
+        with open(p) as _f:
+            return json.load(_f)
     except Exception:
         return {}
 
@@ -159,6 +162,12 @@ def explain(idx, repo, target, k=8):
       CONFIG      — the settings that steer it (file-values)          [config]
       DIVERGENCE  — explicit, groundable conflicts                    [divergence]
       UNCERTAINTY — what we could NOT confirm (never guessed)         [unverified]
+
+    DELIBERATE NON-GOAL: do NOT turn explain into a horizontal search ("ES-ify" it). explain is a deep
+    VERTICAL join on ONE target — method/class nodes, with the values/mutations layer providing field-level
+    detail; it doesn't need finer static nodes. The horizontal "find the relevant code" role already exists
+    as context/candidates (BM25 + embeddings + graph). Keep them separate: context = FIND, explain =
+    UNDERSTAND one thing deeply. Invest search/recall effort in context, not here.
     """
     rg = idx["rg"]
     mem = mine_changes(repo)
@@ -213,6 +222,39 @@ def explain(idx, repo, target, k=8):
         for a, b, c in edges[:k]:
             out.append(f"  [confirmed-runtime] {rg.nodes[a].qual} → {rg.nodes[b].qual}  ({c}x) — real call observed")
 
+    # ---------- STATE — what actually CHANGED (observed mutations, key-by-key) ----------
+    def _q(nid):
+        return rg.nodes[nid].qual if nid in rg.nodes else "?"
+    muts = idx.get("rt_mutations") or []
+    # a mutation is relevant if its writer is IN the region OR is a runtime-callee of a region method
+    # (the leaf setter / cache client is usually a callee of the code you're explaining).
+    focus_reach = set(focus_ids) | {ce for ca, ce, _ in rt_edges if ca in focus_ids}
+    field_muts = [m for m in muts if m.get("kind") == "field" and m.get("anchor") in focus_reach]
+    by_key = {}                                          # resource key -> {writes:[...], reads:[...]}
+    for m in muts:
+        if m.get("kind") == "field" or not m.get("target"):
+            continue
+        e = by_key.setdefault(m["target"], {"writes": [], "reads": []})
+        rec = {"node": m.get("anchor"), "after": m.get("after"), "op": m.get("op"), "envs": m.get("envs", {})}
+        (e["reads"] if m.get("op") == "read" else e["writes"]).append(rec)
+    rel_keys = [key for key, v in by_key.items()
+                if any(e["node"] in focus_reach for e in v["writes"] + v["reads"])]
+    if field_muts or rel_keys:
+        out.append("\n## STATE — what changed (observed mutations, with before→after)")
+        for m in field_muts[:k]:
+            chg = f"{m['before']} → {m['after']}" if m.get("before") else f"set to {m.get('after')}"
+            out.append(f"  [mutation] {m['target']}: {chg}  (by {_q(m.get('anchor'))}, "
+                       f"under {', '.join(sorted(m.get('envs', {})))}, {m.get('n', 1)}×)")
+        for key in rel_keys[:k]:                          # observed writer → key → reader (real runtime key)
+            v = by_key[key]
+            readers = sorted({_q(r["node"]) for r in v["reads"]})
+            for w in v["writes"][:2]:
+                rd = ", ".join(readers) if readers else "no reader observed in this trace"
+                val = f" = {w['after']}" if w.get("after") else ""
+                out.append(f"  [mutation] {w['op']} {key}{val}  by {_q(w['node'])}  →  read by {rd}")
+            if not v["writes"] and readers:               # focus only READ this key; show it had no observed writer
+                out.append(f"  [mutation] read {key}  by {', '.join(readers)}  (no writer observed in this trace)")
+
     # ---------- MECHANISM: the code + why it's coded this way ----------
     out.append("\n## MECHANISM — the code, and why it's this way")
     for n in syms[:k]:
@@ -228,7 +270,8 @@ def explain(idx, repo, target, k=8):
 
     # ---------- EXPECTED: what you told us you expected (the oracle) ----------
     out.append("\n## EXPECTED — what you expected (your corrections / intent)")
-    exp = recall(idx, repo, anchors=focus_ids, files={tfile}, query=target, limit=k, kinds={"expectation"})
+    exp = recall(idx, repo, anchors=focus_ids, files={tfile}, query=target, limit=k,
+                 kinds={"expectation"}, embed_fallback=False)   # explain never loads the embedding model
     if exp:
         for m in exp:
             flag = "" if m["status"] == "active" else "  ⚠(cited code changed since you said this)"
@@ -346,14 +389,16 @@ def _mem_path(repo):
 
 def load_memories(repo):
     try:
-        return json.load(open(_mem_path(repo)))
+        with open(_mem_path(repo)) as _f:
+            return json.load(_f)
     except Exception:
         return []
 
 
 def _save_memories(repo, entries):
     os.makedirs(os.path.join(os.path.abspath(repo), ".vard"), exist_ok=True)
-    json.dump(entries, open(_mem_path(repo), "w"), indent=2)
+    with open(_mem_path(repo), "w") as _o:
+        json.dump(entries, _o, indent=2)
 
 
 def _anchor_hash(idx, repo, anchor):
@@ -372,7 +417,8 @@ def _anchor_hash(idx, repo, anchor):
     if n is None:
         return None
     try:
-        lines = open(os.path.join(os.path.abspath(repo), n.file), encoding="utf-8", errors="ignore").read().splitlines()
+        with open(os.path.join(os.path.abspath(repo), n.file), encoding="utf-8", errors="ignore") as _f:
+            lines = _f.read().splitlines()
         return hashlib.sha1("\n".join(lines[n.start - 1:n.end]).encode("utf-8", "ignore")).hexdigest()[:16]
     except Exception:
         return None
@@ -449,10 +495,12 @@ def _entry_status(idx, repo, entry):
     return "stale" if "stale" in states or "gone" in states else "active"
 
 
-def recall(idx, repo, anchors=None, files=None, query="", limit=6, kinds=None):
+def recall(idx, repo, anchors=None, files=None, query="", limit=6, kinds=None, embed_fallback=True):
     """Fresh, relevant memories. Primary match = anchor/file overlap with the current context; embedding
     similarity over the fact text is the fallback. Drops 'gone' memories; flags 'stale' ones for re-check.
-    `kinds` optionally restricts to a set of MEM_KINDS (e.g. {'expectation'} for the EXPECTED leg)."""
+    `kinds` optionally restricts to a set of MEM_KINDS (e.g. {'expectation'} for the EXPECTED leg).
+    `embed_fallback=False` skips the embedding similarity branch entirely — `explain` uses this so it
+    never loads the embedding model (it joins by anchor, it doesn't rank by content)."""
     rg = idx["rg"]
     entries = load_memories(repo)
     if not entries:
@@ -471,7 +519,7 @@ def recall(idx, repo, anchors=None, files=None, query="", limit=6, kinds=None):
     direct = [(st, e) for hit, st, e in scored if hit]
     if direct:
         out = direct
-    elif query:                                   # fallback: embedding similarity over fact text
+    elif query and embed_fallback:                # fallback: embedding similarity over fact text
         try:
             from . import embed as E
             import numpy as np

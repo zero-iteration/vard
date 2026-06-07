@@ -111,6 +111,7 @@ public class VardAgent {
         @Override public void onTransformation(net.bytebuddy.description.type.TypeDescription td,
                 ClassLoader cl, net.bytebuddy.utility.JavaModule m, boolean loaded,
                 net.bytebuddy.dynamic.DynamicType dt) {
+            Collector.instrumented.add(td.getName());     // persisted → coverage: instrumented-but-never-ran
             if (verbose) System.err.println("[vard-agent] instrumented " + td.getName());
         }
         @Override public void onError(String typeName, ClassLoader cl, net.bytebuddy.utility.JavaModule m,
@@ -119,18 +120,23 @@ public class VardAgent {
         }
     }
 
-    /** Inlined into every instrumented method. Keep tiny; all real work is in Collector (never throws out). */
+    /** Inlined into every instrumented method. Keep tiny; all real work is in Collector (never throws out).
+     *  enter returns the setter's BEFORE value (read off `this` before the field is overwritten); exit
+     *  receives it via @Advice.Enter so a field mutation can be recorded as before→after. */
     public static class MethodAdvice {
         @Advice.OnMethodEnter
-        public static void enter(@Advice.Origin("#t.#m") String qual) {
-            Collector.enter(qual);
+        public static Object enter(@Advice.Origin("#t.#m") String qual,
+                                   @Advice.This(optional = true) Object self) {
+            return Collector.enter(qual, self);
         }
         @Advice.OnMethodExit(onThrowable = Throwable.class)
         public static void exit(@Advice.Origin("#t.#m") String qual,
                                 @Advice.AllArguments(typing = Assigner.Typing.DYNAMIC) Object[] argv,
                                 @Advice.Return(typing = Assigner.Typing.DYNAMIC, readOnly = true) Object ret,
-                                @Advice.Thrown Throwable thrown) {
-            Collector.exit(qual, argv, ret, thrown);
+                                @Advice.Thrown Throwable thrown,
+                                @Advice.This(optional = true) Object self,
+                                @Advice.Enter Object before) {
+            Collector.exit(qual, argv, ret, thrown, self, before);
         }
     }
 
@@ -140,7 +146,10 @@ public class VardAgent {
         static final Map<String, long[]> methods = new ConcurrentHashMap<>();
         static final Map<String, long[]> edges = new ConcurrentHashMap<>();
         static final Map<String, Map<String, long[]>> values = new ConcurrentHashMap<>();
+        static final Map<String, long[]> mutations = new ConcurrentHashMap<>();   // mut-tuple -> count
+        static final Set<String> instrumented = ConcurrentHashMap.newKeySet();    // classes the agent transformed
         static final ThreadLocal<Deque<String>> STACK = ThreadLocal.withInitial(ArrayDeque::new);
+        static final String SEP = "\u0001";
         static String[] valFilter = {"*"};
         static int maxSamples = 8;
         static String env = "";
@@ -151,7 +160,8 @@ public class VardAgent {
             env = envLabel == null ? "" : envLabel;
         }
 
-        public static void enter(String qual) {        // public: the Advice body is INLINED into app classes
+        /** Returns the setter's BEFORE value (rendered) so exit can record before→after; null otherwise. */
+        public static Object enter(String qual, Object self) {   // public: the Advice body is INLINED into app classes
             try {
                 Deque<String> st = STACK.get();
                 String caller = st.peek();
@@ -160,6 +170,7 @@ public class VardAgent {
                     edges.computeIfAbsent(caller + ">" + qual, k -> new long[1])[0]++;
                 st.push(qual);
             } catch (Throwable ignore) { }
+            return setterBefore(qual, self);
         }
 
         // method names that handle secrets — their captured args/returns are REDACTED (a captured decrypted
@@ -168,11 +179,12 @@ public class VardAgent {
         static final java.util.regex.Pattern SECRET = java.util.regex.Pattern.compile(
                 "(?i)(password|passwd|secret|token|credential|apikey|api_key|privatekey|decrypt|encrypt|cipher|signature)");
 
-        public static void exit(String qual, Object[] argv, Object ret, Throwable thrown) {
+        public static void exit(String qual, Object[] argv, Object ret, Throwable thrown, Object self, Object before) {
             try {
                 Deque<String> st = STACK.get();
                 if (!st.isEmpty()) st.pop();
                 if (!captureValues(qual)) return;
+                classify(qual, self, argv, before);              // record state mutations (writes/reads)
                 String key = SECRET.matcher(qual).find()
                         ? "<redacted: secret-handling method>"
                         : sig(argv) + " => " + (thrown != null
@@ -182,6 +194,87 @@ public class VardAgent {
                 if (c != null) c[0]++;
                 else if (m.size() < maxSamples) m.computeIfAbsent(key, k -> new long[1])[0]++;
             } catch (Throwable ignore) { }
+        }
+
+        // ---- mutation / state capture (writes the app ALREADY performs — we only observe) ----------------
+
+        /** Read a setter's field BEFORE it's overwritten (fields only, never a getter → no side effects). */
+        static Object setterBefore(String qual, Object self) {
+            try {
+                if (self == null) return null;
+                int dot = qual.lastIndexOf('.');
+                String method = dot > 0 ? qual.substring(dot + 1) : qual;
+                if (!(method.length() > 3 && method.startsWith("set") && Character.isUpperCase(method.charAt(3)))
+                    || isPlatform(self.getClass().getName())) return null;
+                String field = Character.toLowerCase(method.charAt(3)) + method.substring(4);
+                for (Class<?> k = self.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                    try {
+                        java.lang.reflect.Field f = k.getDeclaredField(field);
+                        f.setAccessible(true);
+                        return render(f.get(self), MAX_DEPTH);
+                    } catch (NoSuchFieldException nsf) { /* keep walking up */ }
+                }
+            } catch (Throwable ignore) { }
+            return null;
+        }
+
+        /** Classify a call as a state mutation: a domain field setter (before→after) OR a data-client
+         *  write/update/del/read on a cache/DB/queue (keyed by the REAL runtime key). Records nothing for
+         *  ordinary methods. The before for setters comes from setterBefore (read in enter). */
+        static void classify(String qual, Object self, Object[] argv, Object before) {
+            try {
+                int dot = qual.lastIndexOf('.');
+                String type = dot > 0 ? qual.substring(0, dot) : "";
+                String method = dot > 0 ? qual.substring(dot + 1) : qual;
+                // 1. domain field setter on an app object → field mutation with before→after
+                if (self != null && method.length() > 3 && method.startsWith("set")
+                    && Character.isUpperCase(method.charAt(3)) && argv != null && argv.length == 1
+                    && !isPlatform(self.getClass().getName())) {
+                    String field = Character.toLowerCase(method.charAt(3)) + method.substring(4);
+                    recordMutation(self.getClass().getSimpleName() + "." + field, "write", "field",
+                                   before == null ? null : before.toString(), render(argv[0], MAX_DEPTH), qual);
+                    return;
+                }
+                // 2. data-client boundary (cache/DB/queue), recognized by the declaring type's name/package
+                String kind = resourceKind(type);
+                if (kind == null || argv == null || argv.length == 0) return;
+                String m = method.toLowerCase();
+                if (m.equals("set") || m.equals("put") || m.equals("setex") || m.equals("hset")
+                    || m.startsWith("save") || m.startsWith("insert") || m.startsWith("update") || m.startsWith("upsert")) {
+                    String k = render(argv[0], MAX_DEPTH);
+                    String val = argv.length >= 2 ? render(argv[1], MAX_DEPTH) : null;
+                    String op = (m.startsWith("save") || m.contains("update") || m.contains("upsert")) ? "update" : "write";
+                    recordMutation(k, op, kind, null, val, qual);
+                } else if (m.equals("del") || m.equals("delete") || m.equals("evict") || m.equals("remove") || m.equals("expire")) {
+                    recordMutation(render(argv[0], MAX_DEPTH), "del", kind, null, null, qual);
+                } else if (m.equals("send") || m.equals("publish") || m.equals("produce")) {
+                    recordMutation(render(argv[0], MAX_DEPTH), "write", "queue", null,
+                                   argv.length >= 2 ? render(argv[1], MAX_DEPTH) : null, qual);
+                } else if (m.equals("get") || m.equals("mget") || m.equals("read") || m.equals("query") || m.startsWith("find")) {
+                    recordMutation(render(argv[0], MAX_DEPTH), "read", kind, null, null, qual);  // for writer→key→reader linking
+                }
+            } catch (Throwable ignore) { }
+        }
+
+        static String resourceKind(String type) {
+            String t = type.toLowerCase();
+            if (t.contains("redis") || t.contains("jedis") || t.contains("lettuce") || t.contains("cache")) return "cache";
+            if (t.contains("mongo") || t.contains("repository") || t.contains("jpa") || t.contains("jdbc")
+                || t.contains("hibernate") || t.contains("datasource") || t.contains("mapper")) return "table";
+            if (t.contains("kafka") || t.contains("rabbit") || t.contains("pulsar") || t.contains("jms")
+                || t.contains("producer")) return "queue";
+            return null;
+        }
+
+        static void recordMutation(String target, String op, String kind, String before, String after, String node) {
+            if (SECRET.matcher(node).find() || (target != null && SECRET.matcher(target).find())) {
+                before = before == null ? null : "<redacted>"; after = after == null ? null : "<redacted>";
+            }
+            String key = node + SEP + (kind == null ? "" : kind) + SEP + (target == null ? "" : target) + SEP + op
+                       + SEP + (before == null ? "" : before) + SEP + (after == null ? "" : after);
+            long[] c = mutations.get(key);
+            if (c != null) c[0]++;
+            else if (mutations.size() < 4000) mutations.computeIfAbsent(key, k -> new long[1])[0]++;
         }
 
         static boolean captureValues(String qual) {
@@ -304,6 +397,15 @@ public class VardAgent {
                         }
                         w.println(b.append("]}").toString());
                     }
+                    for (String cn : instrumented)
+                        w.println("{\"t\":\"class\",\"name\":\"" + esc(cn) + "\"}");   // coverage: instrumented set
+                    for (Map.Entry<String, long[]> mu : mutations.entrySet()) {
+                        String[] p = mu.getKey().split(SEP, -1);   // node, kind, target, op, before, after
+                        if (p.length < 6) continue;
+                        w.println("{\"t\":\"mutation\",\"node\":\"" + esc(p[0]) + "\",\"kind\":\"" + esc(p[1])
+                                  + "\",\"target\":\"" + esc(p[2]) + "\",\"op\":\"" + esc(p[3]) + "\",\"before\":\""
+                                  + esc(p[4]) + "\",\"after\":\"" + esc(p[5]) + "\",\"n\":" + mu.getValue()[0] + "}");
+                    }
                 }
                 try {
                     java.nio.file.Files.move(tmp.toPath(), f.toPath(),
@@ -315,7 +417,7 @@ public class VardAgent {
                 if (announce)
                     System.err.println("[vard-agent] wrote runtime trace: " + out + "." + pid
                                        + " (" + methods.size() + " methods, " + edges.size() + " edges, "
-                                       + values.size() + " valued)");
+                                       + values.size() + " valued, " + mutations.size() + " mutations)");
             } catch (Throwable ex) { System.err.println("[vard-agent] dump failed: " + ex); }
         }
 

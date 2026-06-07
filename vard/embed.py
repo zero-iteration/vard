@@ -141,8 +141,11 @@ def node_chunk_texts(node_list, repo_dir):
     filecache = {}
     def src(n):
         if n.file not in filecache:
-            try: filecache[n.file] = open(os.path.join(repo_dir, n.file), encoding="utf-8", errors="ignore").read().splitlines()
-            except Exception: filecache[n.file] = []
+            try:
+                with open(os.path.join(repo_dir, n.file), encoding="utf-8", errors="ignore") as _f:
+                    filecache[n.file] = _f.read().splitlines()
+            except Exception:
+                filecache[n.file] = []
         return f"{n.type} {n.qual}\n" + "\n".join(filecache[n.file][n.start - 1:n.end])
     return {n.id: _chunks(src(n)) for n in node_list}
 

@@ -71,9 +71,16 @@ def ingest(idx, repo, trace_path, env=None):
                if e["caller"] in rg.nodes and e["callee"] in rg.nodes}
     valuemap = {a: {s["v"]: dict(s.get("envs", {})) for s in samples}     # anchor -> {sample-string -> {env:n}}
                 for a, samples in prior.get("values", {}).items() if a in rg.nodes}
+    # mutations keyed by tuple → {fields, envs}. The writer node qual is resolved to a node id where possible.
+    mutmap = {}
+    for mu in prior.get("mutations", []):
+        mutmap[(mu.get("anchor") or mu.get("node"), mu.get("kind"), mu.get("target"),
+                mu.get("op"), mu.get("before"), mu.get("after"))] = dict(mu.get("envs", {}))
     runs = dict(prior.get("runs", {}))
+    instrumented = set(prior.get("instrumented_classes", []))    # classes the agent transformed (coverage)
     try:
-        lines = [l.strip() for l in open(trace_path, encoding="utf-8", errors="ignore") if l.strip()]
+        with open(trace_path, encoding="utf-8", errors="ignore") as _f:
+            lines = [l.strip() for l in _f if l.strip()]
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
     def _loads(s):
@@ -126,31 +133,45 @@ def ingest(idx, repo, trace_path, env=None):
                 bucket = valuemap.setdefault(nid, {})
                 for s in o.get("samples", []):
                     _add_env(bucket.setdefault(s["v"], {}), eff_env, s.get("n", 1))
+            elif t == "mutation":                            # observed state change (write/update/del/read)
+                anchor = _resolve_qual(q2i, o.get("node", ""))   # may be None if the writer isn't an indexed node
+                k = (anchor, o.get("kind"), o.get("target"), o.get("op"),
+                     o.get("before") or None, o.get("after") or None)
+                _add_env(mutmap.setdefault(k, {}), eff_env, o.get("n", 1))
+            elif t == "class":                               # instrumented-class set (for coverage diagnosis)
+                if o.get("name"):
+                    instrumented.add(o["name"])
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
     # cap stored value samples per method (most-observed first) so the overlay can't bloat
     values_out = {a: [{"v": v, "n": sum(envs.values()), "envs": envs}
                       for v, envs in sorted(b.items(), key=lambda kv: -sum(kv[1].values()))[:8]]
                   for a, b in valuemap.items()}
-    data = {"methods": list(methods.values()), "edges": list(edgeset.values()),
-            "values": values_out, "runs": runs}
-    os.makedirs(os.path.dirname(_path(repo)), exist_ok=True)
-    json.dump(data, open(_path(repo), "w"), indent=2)
+    mutations_out = [{"anchor": k[0], "kind": k[1], "target": k[2], "op": k[3], "before": k[4],
+                      "after": k[5], "n": sum(envs.values()), "envs": envs}
+                     for k, envs in sorted(mutmap.items(), key=lambda kv: -sum(kv[1].values()))[:1000]]
     # histogram unresolved quals by class prefix (drop the method segment) so the user can see WHAT missed —
     # a big lambda/synthetic/generated bucket is expected; real misses (an indexed class) are worth chasing.
-    hist = {}
+    hist = dict(prior.get("unresolved", {}))
     for q, c in unresolved_quals.items():
         cls = q.rsplit(".", 1)[0] if "." in q else q
         hist[cls] = hist.get(cls, 0) + c
     top_unresolved = sorted(hist.items(), key=lambda kv: -kv[1])[:8]
+    data = {"methods": list(methods.values()), "edges": list(edgeset.values()),
+            "values": values_out, "mutations": mutations_out, "runs": runs,
+            "instrumented_classes": sorted(instrumented), "unresolved": hist}
+    os.makedirs(os.path.dirname(_path(repo)), exist_ok=True)
+    with open(_path(repo), "w") as _o:
+        json.dump(data, _o, indent=2)
     return {"ok": True, "env": eff_env, "methods": len(methods), "edges": len(edgeset),
-            "values": len(values_out), "runs": sorted(runs), "unresolved": unresolved,
-            "unresolved_top": top_unresolved}
+            "values": len(values_out), "mutations": len(mutations_out), "runs": sorted(runs),
+            "unresolved": unresolved, "unresolved_top": top_unresolved}
 
 
 def load(repo):
     try:
-        return json.load(open(_path(repo)))
+        with open(_path(repo)) as _f:
+            return json.load(_f)
     except Exception:
         return {"methods": [], "edges": []}
 
@@ -241,7 +262,42 @@ def attach(idx, repo):
         idx["rt_method_envs"] = {m["anchor"]: m.get("envs", {})           # which env(s) each method ran under
                                  for m in data.get("methods", []) if m["anchor"] in conf}
         idx["rt_config_values"] = observed_config_values(idx)            # key -> live observed value
+        # observed state mutations; keep those whose writer node is still fresh (or has no resolvable node)
+        idx["rt_mutations"] = [m for m in data.get("mutations", [])
+                               if not m.get("anchor") or m["anchor"] in conf]
+        idx["rt_instrumented"] = set(data.get("instrumented_classes", []))   # for coverage diagnosis
     except Exception:
         idx["rt_confirmed"] = set(); idx["rt_traced"] = set(); idx["rt_edges"] = []
-        idx["rt_values"] = {}; idx["rt_runs"] = {}; idx["rt_method_envs"] = {}; idx["rt_config_values"] = {}
+        idx["rt_values"] = {}; idx["rt_runs"] = {}; idx["rt_method_envs"] = {}
+        idx["rt_config_values"] = {}; idx["rt_mutations"] = []; idx["rt_instrumented"] = set()
     return idx
+
+
+def _class_of(qual):
+    """The declaring-class qual of a node qual (drop the trailing method segment)."""
+    return qual.rsplit(".", 1)[0] if "." in qual else qual
+
+
+def coverage(idx, repo, node_id):
+    """Classify a method for the 'did it miss X / is it a gap?' question:
+       executed         — observed running (on a traced path),
+       instrumented     — its class WAS instrumented but the method never ran (coverage gap: drive it),
+       not-instrumented — its class was never transformed (real gap — check `--debug` for a WARN),
+       no-trace         — there's no runtime overlay at all yet."""
+    rg = idx["rg"]
+    n = rg.nodes.get(node_id)
+    if n is None:
+        return {"status": "unknown"}
+    traced = idx.get("rt_traced") or set()
+    instr = idx.get("rt_instrumented") or set()
+    me = idx.get("rt_method_envs") or {}
+    if not traced and not instr:
+        return {"status": "no-trace", "qual": n.qual}
+    if node_id in traced:
+        envs = sorted(me.get(node_id, {}))
+        return {"status": "executed", "qual": n.qual, "envs": envs,
+                "fresh": node_id in (idx.get("rt_confirmed") or set())}
+    # class instrumented? match the node's declaring class against the instrumented FQNs (suffix-tolerant)
+    cls = _class_of(n.qual)
+    hit = any(ic == cls or ic.endswith("." + cls) or ic.replace("$", ".").endswith("." + cls) for ic in instr)
+    return {"status": "instrumented" if hit else "not-instrumented", "qual": n.qual}

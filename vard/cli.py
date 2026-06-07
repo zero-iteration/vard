@@ -205,7 +205,8 @@ def load_index(repo):
     if not os.path.isfile(p):
         return None
     try:
-        return pickle.load(open(p, "rb"))
+        with open(p, "rb") as _f:
+            return pickle.load(_f)
     except Exception:
         return None        # stale/incompatible cache → caller rebuilds
 
@@ -457,6 +458,34 @@ def explain_text(target, repo):
         return f"No index. Run: vard init {repo}"
     from . import memory as MEM
     return MEM.explain(idx, os.path.abspath(repo), target)
+
+
+def coverage_text(target, repo):
+    """Answer 'did it run / is it a gap?' deterministically for a method: executed vs instrumented-but-
+    never-ran (drive it) vs never-instrumented (real gap)."""
+    idx = fresh_index(repo)
+    if not idx:
+        return f"No index. Run: vard init {repo}"
+    from . import runtime as RT, query as Q
+    rg = idx["rg"]
+    ids = Q.resolve_target(idx, target)
+    if not ids:
+        return f"coverage: symbol not found for '{target}'"
+    out = [f"# Coverage for: {target}"]
+    for nid in ids[:8]:
+        c = RT.coverage(idx, repo, nid); n = rg.nodes[nid]; s = c["status"]
+        if s == "executed":
+            tail = "" if c["fresh"] else " — but its code CHANGED since the trace (re-run)"
+            out.append(f"  ✓ {n.qual} — EXECUTED (observed under {', '.join(c['envs']) or 'a run'}){tail}")
+        elif s == "instrumented":
+            out.append(f"  ○ {n.qual} — INSTRUMENTED but never ran → not on any traced path. Drive it "
+                       "(a request/test that reaches it), then re-run.")
+        elif s == "not-instrumented":
+            out.append(f"  ✗ {n.qual} — class NOT instrumented → real gap (class not loaded, outside --pkgs, "
+                       "or transform failed — re-run `vard test --debug` and check for a WARN).")
+        else:
+            out.append(f"  ? {n.qual} — no runtime overlay yet. Run `vard test`/`vard attach` first.")
+    return "\n".join(out)
 
 
 def recall_text(task, repo):
@@ -817,6 +846,8 @@ def main():
     pex.add_argument("repo", nargs="?", default="."); pex.add_argument("--reason", default="")
     pxp = sub.add_parser("explain", help="actual-vs-expected JOIN for a symbol/file/ticket (provenance-tagged)")
     pxp.add_argument("target"); pxp.add_argument("repo", nargs="?", default=".")
+    pcv = sub.add_parser("coverage", help="did a method run? executed vs instrumented-but-never-ran vs gap")
+    pcv.add_argument("target"); pcv.add_argument("repo", nargs="?", default=".")
     prc = sub.add_parser("recall"); prc.add_argument("task"); prc.add_argument("repo", nargs="?", default=".")
     pcf = sub.add_parser("config"); pcf.add_argument("query"); pcf.add_argument("repo", nargs="?", default=".")
     ph = sub.add_parser("install-hook"); ph.add_argument("repo", nargs="?", default="."); ph.add_argument("--global", dest="glob", action="store_true")
@@ -900,6 +931,8 @@ def _dispatch(a):
         print(expect_text(a.fact, a.citations, a.repo, reason=a.reason))
     elif a.cmd == "explain":
         print(explain_text(a.target, a.repo))
+    elif a.cmd == "coverage":
+        print(coverage_text(a.target, a.repo))
     elif a.cmd == "recall":
         print(recall_text(a.task, a.repo))
     elif a.cmd == "config":

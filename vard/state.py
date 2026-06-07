@@ -42,7 +42,8 @@ def _content_nodes(rg):
 def _src(repo, rel, cache):
     if rel not in cache:
         try:
-            cache[rel] = open(os.path.join(repo, rel), encoding="utf-8", errors="ignore").read().splitlines()
+            with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as _f:
+                cache[rel] = _f.read().splitlines()
         except Exception:
             cache[rel] = []
     return cache[rel]

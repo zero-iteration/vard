@@ -196,6 +196,17 @@ def vard_whole_picture(target: str, repo: str) -> str:
 
 @mcp.tool()
 @_safe
+def vard_coverage(target: str, repo: str) -> str:
+    """Did a method actually run, or is its absence a gap? For a function/method, returns one of: EXECUTED
+    (observed on a traced path), INSTRUMENTED-but-never-ran (it's reachable to the agent but no traced
+    request/test hit it — drive it), or NOT-instrumented (a real gap — class not loaded / outside the trace
+    scope / transform failed). Use this when runtime/explain doesn't show a method you expected — it tells
+    you whether to drive a different path or whether instrumentation missed it, instead of guessing."""
+    return cli.coverage_text(target, repo)
+
+
+@mcp.tool()
+@_safe
 def vard_index(repo: str, fresh: bool = False) -> str:
     """Build/refresh the VARD index (attention graph + data-resource layer). Key-free by default."""
     s = cli.build_index(repo, fresh=fresh)
@@ -223,7 +234,26 @@ def vard_set_ruleset(repo: str, ruleset_json: str) -> str:
     return f"ruleset saved + reindexed: {json.dumps(s)}"
 
 
+def _reap_on_parent_death():
+    """Exit when our parent (the MCP client) dies — stdio servers can be left orphaned on client
+    disconnect, leaking processes across a session. A reparented process (getppid → 1) means the
+    parent is gone; bail immediately so we don't linger."""
+    import threading, time
+    ppid0 = os.getppid()
+    def watch():
+        while True:
+            time.sleep(5)
+            try:
+                if os.getppid() != ppid0:      # reparented to init → original parent died
+                    os._exit(0)
+            except Exception:
+                os._exit(0)
+    t = threading.Thread(target=watch, name="vard-mcp-reaper", daemon=True)
+    t.start()
+
+
 def main():
+    _reap_on_parent_death()
     mcp.run(transport="stdio")
 
 

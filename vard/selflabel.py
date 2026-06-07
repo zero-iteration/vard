@@ -25,7 +25,8 @@ def weights_path(repo):
 
 def load_weights(repo):
     try:
-        w = json.load(open(weights_path(repo)))
+        with open(weights_path(repo)) as _f:
+            w = json.load(_f)
         return {k: v for k, v in w.items() if not k.startswith("_")}
     except Exception:
         return None
@@ -107,5 +108,6 @@ def learn(repo, idx, sample=150):
     if not w:
         return None
     os.makedirs(os.path.join(os.path.abspath(repo), ".vard"), exist_ok=True)
-    json.dump(w, open(weights_path(repo), "w"), indent=2)
+    with open(weights_path(repo), "w") as _o:
+        json.dump(w, _o, indent=2)
     return w

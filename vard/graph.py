@@ -90,7 +90,8 @@ def build_graph(repo_dir, extra_roots=None):
                 seg in ("vendor", "bower_components", "node_modules", "third_party") for seg in rel.split(os.sep)):
             continue
         try:
-            src = open(os.path.join(repo_dir, rel), encoding="utf-8", errors="ignore").read()
+            with open(os.path.join(repo_dir, rel), encoding="utf-8", errors="ignore") as _f:
+                src = _f.read()
             if src and max((len(l) for l in src.splitlines()), default=0) > 2000:
                 continue                              # minified / generated — skip
             art = prov.parse(repo_dir, rel, src)

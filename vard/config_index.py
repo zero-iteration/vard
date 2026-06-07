@@ -44,12 +44,13 @@ def _norm(key):
 def _parse_props(path):
     out = []
     try:
-        for i, line in enumerate(open(path, encoding="utf-8", errors="ignore"), 1):
-            if line.lstrip().startswith(("#", "!")):
-                continue
-            m = _PROP_LINE.match(line)
-            if m and m.group(1):
-                out.append((m.group(1), m.group(2), i))
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, 1):
+                if line.lstrip().startswith(("#", "!")):
+                    continue
+                m = _PROP_LINE.match(line)
+                if m and m.group(1):
+                    out.append((m.group(1), m.group(2), i))
     except Exception:
         pass
     return out
@@ -60,20 +61,21 @@ def _parse_yaml(path):
     `a:\\n  b:\\n    c: val` case; ignores list items and block scalars."""
     out, stack = [], []           # stack of (indent, key)
     try:
-        for i, raw in enumerate(open(path, encoding="utf-8", errors="ignore"), 1):
-            if not raw.strip() or raw.lstrip().startswith(("#", "-")):
-                continue
-            indent = len(raw) - len(raw.lstrip(" "))
-            m = re.match(r'\s*([A-Za-z0-9_.\-]+)\s*:\s*(.*?)\s*$', raw)
-            if not m:
-                continue
-            key, val = m.group(1), m.group(2)
-            while stack and stack[-1][0] >= indent:
-                stack.pop()
-            stack.append((indent, key))
-            if val and not val.startswith(("#", "|", ">", "&", "*")):
-                dotted = ".".join(k for _, k in stack)
-                out.append((dotted, val.strip('"\''), i))
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for i, raw in enumerate(f, 1):
+                if not raw.strip() or raw.lstrip().startswith(("#", "-")):
+                    continue
+                indent = len(raw) - len(raw.lstrip(" "))
+                m = re.match(r'\s*([A-Za-z0-9_.\-]+)\s*:\s*(.*?)\s*$', raw)
+                if not m:
+                    continue
+                key, val = m.group(1), m.group(2)
+                while stack and stack[-1][0] >= indent:
+                    stack.pop()
+                stack.append((indent, key))
+                if val and not val.startswith(("#", "|", ">", "&", "*")):
+                    dotted = ".".join(k for _, k in stack)
+                    out.append((dotted, val.strip('"\''), i))
     except Exception:
         pass
     return out
