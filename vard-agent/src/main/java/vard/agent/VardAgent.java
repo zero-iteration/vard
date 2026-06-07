@@ -173,17 +173,73 @@ public class VardAgent {
             return false;
         }
 
-        /** Type-bounded, PII-safe rendering. Numbers/booleans/strings/enums only; never toString arbitrary
-         *  objects (could leak PII, be huge, or have side effects) — emit just the type name instead. */
+        static final int STR_CAP = 64, MAX_FIELDS = 12, MAX_ELEMS = 3, MAX_DEPTH = 3, RENDER_CAP = 280;
+
         static String safe(Object o) {
-            if (o == null) return "null";
-            if (o instanceof String) {
-                String s = (String) o;
-                return "\"" + esc(s.length() > 64 ? s.substring(0, 64) + "…" : s) + "\"";
-            }
-            if (o instanceof Number || o instanceof Boolean || o instanceof Character) return o.toString();
-            if (o instanceof Enum) return ((Enum<?>) o).name();
-            return "<" + o.getClass().getSimpleName() + ">";
+            String s = render(o, MAX_DEPTH);
+            return s.length() > RENDER_CAP ? s.substring(0, RENDER_CAP) + "…" : s;
+        }
+
+        /** Decision-aware, PII-safe rendering. Scalars verbatim; Optional/Collection unwrapped; app objects
+         *  UNFOLDED into their scalar FIELDS (read reflectively — fields only, never getters, so no side
+         *  effects). This is what turns "=> <Optional>" into "=> Optional[Option{price=300, score=5400}]" so
+         *  the decision numbers are visible. Bounded: depth, field count, element count, string length; field
+         *  names matching the secret pattern are redacted; JDK/platform objects are NOT field-reflected. */
+        static String render(Object o, int depth) {
+            try {
+                if (o == null) return "null";
+                if (o instanceof String) {
+                    String s = (String) o;
+                    return "\"" + esc(s.length() > STR_CAP ? s.substring(0, STR_CAP) + "…" : s) + "\"";
+                }
+                if (o instanceof Number || o instanceof Boolean || o instanceof Character) return o.toString();
+                if (o instanceof Enum) return ((Enum<?>) o).name();
+                Class<?> c = o.getClass();
+                if (o instanceof java.util.Optional) {
+                    java.util.Optional<?> op = (java.util.Optional<?>) o;
+                    return op.isPresent() ? "Optional[" + render(op.get(), depth - 1) + "]" : "Optional.empty";
+                }
+                if (o instanceof java.util.Collection) {
+                    java.util.Collection<?> col = (java.util.Collection<?>) o;
+                    int n = col.size();
+                    if (depth <= 0 || n == 0) return "[" + n + " items]";
+                    StringBuilder b = new StringBuilder("[");
+                    int i = 0;
+                    try {
+                        for (Object e : col) {
+                            if (i > 0) b.append(", ");
+                            b.append(render(e, depth - 1));
+                            if (++i >= MAX_ELEMS) { if (n > MAX_ELEMS) b.append(", …+").append(n - MAX_ELEMS); break; }
+                        }
+                    } catch (Throwable lazy) { return "[" + n + " items]"; }   // lazy collection — don't force it
+                    return b.append("]").toString();
+                }
+                if (o instanceof java.util.Map) return "{" + ((java.util.Map<?, ?>) o).size() + " entries}";
+                if (depth <= 0 || isPlatform(c.getName())) return "<" + c.getSimpleName() + ">";
+                StringBuilder b = new StringBuilder(c.getSimpleName() + "{");
+                int shown = 0;
+                for (Class<?> k = c; k != null && k != Object.class && shown < MAX_FIELDS; k = k.getSuperclass()) {
+                    for (java.lang.reflect.Field f : k.getDeclaredFields()) {
+                        if (shown >= MAX_FIELDS) break;
+                        int mod = f.getModifiers();
+                        if (java.lang.reflect.Modifier.isStatic(mod) || f.isSynthetic()) continue;
+                        Object fv;
+                        try { f.setAccessible(true); fv = f.get(o); } catch (Throwable t) { continue; }
+                        String name = f.getName();
+                        if (shown > 0) b.append(", ");
+                        b.append(name).append("=").append(SECRET.matcher(name).find() ? "<redacted>"
+                                                                                       : render(fv, depth - 1));
+                        shown++;
+                    }
+                }
+                return b.append("}").toString();
+            } catch (Throwable t) { return "<?>"; }
+        }
+
+        static boolean isPlatform(String cn) {
+            return cn.startsWith("java.") || cn.startsWith("javax.") || cn.startsWith("jakarta.")
+                || cn.startsWith("jdk.") || cn.startsWith("sun.") || cn.startsWith("com.sun.")
+                || cn.startsWith("kotlin.") || cn.startsWith("scala.");
         }
 
         static String sig(Object[] argv) {
@@ -191,9 +247,10 @@ public class VardAgent {
             StringBuilder b = new StringBuilder("(");
             for (int i = 0; i < argv.length; i++) {
                 if (i > 0) b.append(", ");
-                b.append(safe(argv[i]));
+                b.append(render(argv[i], MAX_DEPTH));
             }
-            return b.append(")").toString();
+            String s = b.append(")").toString();
+            return s.length() > RENDER_CAP ? s.substring(0, RENDER_CAP) + "…)" : s;
         }
 
         static void dump(String out) { dump(out, true); }

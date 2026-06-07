@@ -109,6 +109,19 @@ class RuntimeIngestTest(unittest.TestCase):
         self.assertTrue(r["ok"])                                   # resilient: one bad line is skipped
         self.assertEqual(r["methods"], 1)
 
+    def test_lambda_attributed_to_enclosing_method(self):
+        idx = cli.load_index(self.root)
+        # a synthetic lambda body should credit its enclosing method, not land in the unresolved bucket
+        r = RT.ingest(idx, self.root, _trace(self.root, [
+            {"t": "config", "env": "test"},
+            {"t": "method", "qual": "Service.lambda$compute$0", "hits": 1},
+            {"t": "method", "qual": "com.app.Generated$$Synthetic.x", "hits": 1},  # genuinely unresolved
+        ]), env="test")
+        confirmed = {m["qual"] for m in RT.load(self.root)["methods"]}
+        self.assertIn("Service.compute", confirmed)               # lambda credited to compute
+        self.assertEqual(r["unresolved"], 1)                      # only the synthetic one
+        self.assertTrue(r["unresolved_top"])                      # histogram populated for diagnosis
+
     def test_freshness_staleness(self):
         idx = cli.load_index(self.root)
         RT.ingest(idx, self.root, _trace(self.root, [
@@ -206,6 +219,13 @@ class ObservedConfigTest(unittest.TestCase):
         idx = {"config": {"app.mode": {"defs": [{"key": "app.mode", "value": "x", "file": "x", "line": 1}]}},
                "rt_values": {"a::b": [{"v": '("unrelated.arg") => "z"', "n": 1, "envs": {}}]}}
         self.assertEqual(RT.observed_config_values(idx), {})
+
+    def test_key_as_non_first_arg(self):
+        # a getter like get(scope, key) — the key is the SECOND arg; must still be found
+        idx = {"config": {"app.mode": {"defs": [{"key": "app.mode", "value": "x", "file": "x", "line": 1}]}},
+               "rt_values": {"a::b": [{"v": '("GLOBAL", "app.mode") => "LIVE"', "n": 1, "envs": {"prod": 1}}]}}
+        out = RT.observed_config_values(idx)
+        self.assertEqual(out.get("app.mode", {}).get("value"), "LIVE")
 
 
 class ExplainTest(unittest.TestCase):

@@ -29,10 +29,16 @@ def _qual_index(rg):
     return idx
 
 
+_LAMBDA = __import__("re").compile(r"lambda\$(\w+)\$\d+")
+
+
 def _resolve_qual(qual2ids, trace_qual):
-    """Map a JVM trace qual to a node id. Normalize nested-class `$`→`.`, then try dotted suffixes of the
-    FQN from longest to shortest, returning the first (longest, most specific) that hits exactly one node."""
-    q = trace_qual.replace("$", ".")
+    """Map a JVM trace qual to a node id. Attribute synthetic lambda bodies to their ENCLOSING method
+    (`Foo.lambda$score$0` → `Foo.score` — a lambda running means its method ran), normalize nested-class
+    `$`→`.`, then try dotted suffixes of the FQN from longest to shortest, returning the first (longest,
+    most specific) that hits a node. This collapses most of the 'unresolved' bucket, which is dominated by
+    lambdas/synthetic methods, and correctly credits the real method."""
+    q = _LAMBDA.sub(r"\1", trace_qual).replace("$", ".")
     parts = q.split(".")
     for i in range(len(parts)):                      # i=0 → full FQN, then drop leading segments
         cand = ".".join(parts[i:])
@@ -81,6 +87,12 @@ def ingest(idx, repo, trace_path, env=None):
     eff_env = (str(env or cfg.get("env") or cfg.get("profile") or "default")).strip() or "default"
     runs[eff_env] = {"profile": cfg.get("profile", ""), "mode": cfg.get("mode", "sample")}
     unresolved = 0
+    unresolved_quals = {}                                    # qual -> count, for a diagnostic histogram
+    def _miss(qual):
+        nonlocal unresolved
+        unresolved += 1
+        if len(unresolved_quals) < 500:
+            unresolved_quals[qual] = unresolved_quals.get(qual, 0) + 1
     try:
         for line in lines:
             o = _loads(line)                                 # one malformed line must not drop the whole trace
@@ -90,7 +102,7 @@ def ingest(idx, repo, trace_path, env=None):
             if t == "method":
                 nid = _resolve_qual(q2i, o["qual"])
                 if not nid:
-                    unresolved += 1; continue
+                    _miss(o.get("qual", "?")); continue
                 n = rg.nodes[nid]
                 m = methods.get(nid) or {"anchor": nid, "file": n.file, "qual": n.qual, "envs": {}}
                 m.setdefault("envs", {})
@@ -110,7 +122,7 @@ def ingest(idx, repo, trace_path, env=None):
             elif t == "value":
                 nid = _resolve_qual(q2i, o["qual"])
                 if not nid:
-                    unresolved += 1; continue
+                    _miss(o.get("qual", "?")); continue
                 bucket = valuemap.setdefault(nid, {})
                 for s in o.get("samples", []):
                     _add_env(bucket.setdefault(s["v"], {}), eff_env, s.get("n", 1))
@@ -124,8 +136,16 @@ def ingest(idx, repo, trace_path, env=None):
             "values": values_out, "runs": runs}
     os.makedirs(os.path.dirname(_path(repo)), exist_ok=True)
     json.dump(data, open(_path(repo), "w"), indent=2)
+    # histogram unresolved quals by class prefix (drop the method segment) so the user can see WHAT missed —
+    # a big lambda/synthetic/generated bucket is expected; real misses (an indexed class) are worth chasing.
+    hist = {}
+    for q, c in unresolved_quals.items():
+        cls = q.rsplit(".", 1)[0] if "." in q else q
+        hist[cls] = hist.get(cls, 0) + c
+    top_unresolved = sorted(hist.items(), key=lambda kv: -kv[1])[:8]
     return {"ok": True, "env": eff_env, "methods": len(methods), "edges": len(edgeset),
-            "values": len(values_out), "runs": sorted(runs), "unresolved": unresolved}
+            "values": len(values_out), "runs": sorted(runs), "unresolved": unresolved,
+            "unresolved_top": top_unresolved}
 
 
 def load(repo):
@@ -187,11 +207,10 @@ def observed_config_values(idx):
             if " => " not in v:
                 continue
             argpart, ret = v.split(" => ", 1)
-            m = _ARG_STR.search(argpart)                 # first quoted arg = the key passed to the getter
-            if not m:
-                continue
-            key = _norm(m.group(1))
-            if key not in keyset:
+            # scan ALL quoted args (a config getter may take the key as a non-first arg, e.g.
+            # getProperty(default, key) or get(scope, key)) — the first arg matching a known key wins.
+            key = next((_norm(g) for g in _ARG_STR.findall(argpart) if _norm(g) in keyset), None)
+            if key is None:
                 continue
             rv = ret.strip()
             if rv.startswith('"') and rv.endswith('"'):

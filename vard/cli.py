@@ -703,35 +703,48 @@ def run_test(repo, command, jar=None, pkgs=None, ms="2", env=None):
         rc = subprocess.run(cmd, cwd=os.path.abspath(repo), env=jenv).returncode
     except FileNotFoundError:
         return f"vard test: command not found: {cmd[0]}"
-    return _ingest_traces(idx, repo, tracedir, env=runenv,
-                          header=f"✓ vard test: exit {rc}; ", clean=True)
+    return _ingest_traces(idx, repo, tracedir, env=runenv, label="vard test", rc=rc, clean=True)
 
 
-def _ingest_traces(idx, repo, tracedir, env, header, clean):
+def _ingest_traces(idx, repo, tracedir, env, label, rc, clean):
     """Merge every per-PID trace file in `tracedir` into the runtime overlay under `env`. Shared by
-    `vard test` and `vard attach`."""
+    `vard test` and `vard attach`. `rc` is the launched command's exit code (None for attach) — used to
+    distinguish a failed build from the agent not engaging."""
     import glob
     from . import runtime as RT
     # exclude *.tmp — the agent writes a temp file then atomically renames; a .tmp is a half-written snapshot
     traces = sorted(t for t in glob.glob(os.path.join(tracedir, "run.jsonl.*")) if not t.endswith(".tmp"))
     if not traces:
-        return (header + "no trace captured. The target JVM may not have honored the agent, or no app "
-                "classes (pkgs filter) executed.")
+        if rc not in (None, 0):                              # the command itself failed — say so, don't blame the agent
+            return (f"✗ {label}: the command FAILED (exit {rc}) — nothing ran under the agent. Fix the build/"
+                    "compile error shown above, then re-run. For a boot-only run, skip the test phase "
+                    "(e.g. `-DskipTests -Dmaven.test.skip=true`, or run the app directly).")
+        return (f"✗ {label}: no trace captured. The target JVM may not have honored the agent (check the "
+                "'[vard-agent] installing' line above), or no app classes matched the pkgs filter.")
     tot = {"methods": 0, "edges": 0, "values": 0, "unresolved": 0, "runs": []}
+    hist = {}
     for tp in traces:
         r = RT.ingest(idx, repo, tp, env=env)
         if r.get("ok"):
             tot.update(methods=r["methods"], edges=r["edges"], values=r["values"], runs=r["runs"])
             tot["unresolved"] += r.get("unresolved", 0)
+            for cls, n in r.get("unresolved_top", []):
+                hist[cls] = hist.get(cls, 0) + n
     if clean:
         for tp in traces:
             try: os.remove(tp)
             except OSError: pass
-    return (header + f"merged {len(traces)} JVM trace(s) into env='{env}' → runtime overlay\n"
-            f"  {tot['methods']} methods confirmed live, {tot['edges']} real call edges, {tot['values']} with values"
-            + (f"  ({tot['unresolved']} unmatched)" if tot["unresolved"] else "")
-            + f"\n  runs in overlay: {', '.join(tot['runs'])}"
-            + f"\n  → context/impact/explain now use these as runtime-confirmed (ground truth).")
+    out = (f"✓ {label}" + (f" (exit {rc})" if rc is not None else "")
+           + f": merged {len(traces)} JVM trace(s) into env='{env}' → runtime overlay\n"
+           f"  {tot['methods']} methods confirmed live, {tot['edges']} real call edges, {tot['values']} with values"
+           + (f"  ({tot['unresolved']} trace quals unmatched to indexed nodes)" if tot["unresolved"] else "")
+           + f"\n  runs in overlay: {', '.join(tot['runs'])}")
+    if tot["unresolved"] and hist:                           # diagnostic: where the unmatched quals came from
+        top = sorted(hist.items(), key=lambda kv: -kv[1])[:5]
+        out += "\n  unmatched by class (top): " + "; ".join(f"{c} ×{n}" for c, n in top)
+        out += "\n    (lambdas/synthetic/generated are expected; an INDEXED class here is worth chasing)"
+    out += "\n  → context/impact/explain now use these as runtime-confirmed (ground truth)."
+    return out
 
 
 def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5):
@@ -772,7 +785,7 @@ def attach_run(pid, repo, jar=None, pkgs=None, env="local", for_secs=30, flush=5
     print(f"→ vard: attached. Exercise the app now — observing for {for_secs}s...", file=sys.stderr)
     time.sleep(for_secs)
     return _ingest_traces(idx, repo, tracedir, env=env,
-                          header=f"✓ vard attach: pid {pid} observed {for_secs}s; ", clean=True)
+                          label=f"vard attach: pid {pid} observed {for_secs}s", rc=None, clean=True)
 
 
 def main():
